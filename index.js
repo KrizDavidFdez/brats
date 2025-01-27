@@ -33,11 +33,15 @@ app.post("/api/json", (req, res) => {
     // Dividir el texto en líneas si es necesario (usando saltos de línea)
     let textArray = text.split("\n");
     let tick = 0;
-    const margin = (400 - textArray.length * 75) / 2;  // Centrar el texto
+    const lineHeight = 75;  // Altura de cada línea de texto
+    const totalTextHeight = textArray.length * lineHeight;
+    const startY = (imgCanvas.height - totalTextHeight) / 2;  // Iniciar en el centro verticalmente
 
     // Escribir el texto en el canvas
     textArray.forEach((lineText) => {
-        ctx.fillText(lineText, imgCanvas.width / 2, margin + 75 * tick + 60);  // Posición ajustada
+        const textWidth = ctx.measureText(lineText).width;  // Medir el ancho del texto
+        const startX = (imgCanvas.width - textWidth) / 2;  // Centrar el texto horizontalmente
+        ctx.fillText(lineText, startX, startY + lineHeight * tick);
         tick++;
     });
 
@@ -58,3 +62,4 @@ app.post("/api/json", (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
+            
