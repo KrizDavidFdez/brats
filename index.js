@@ -30,7 +30,7 @@ app.post("/api/json", (req, res) => {
     ctx.fillStyle = "black";
     ctx.font = "75px Arial Narrow";  // Fuente de texto
 
-    // Dividir el texto en líneas si es necesario
+    // Dividir el texto en líneas si es necesario (usando saltos de línea)
     let textArray = text.split("\n");
     let tick = 0;
     const margin = (400 - textArray.length * 75) / 2;  // Centrar el texto
@@ -58,4 +58,3 @@ app.post("/api/json", (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
-            
