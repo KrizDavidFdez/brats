@@ -1,85 +1,65 @@
-<!DOCTYPE html>
+            <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Generador de Imagen Base64</title>
-    <style>
-                * {
-            margin: 0;
-            padding: 0;
-            background-color: #1f1f1f;
-        }
-
-        body {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            color: #fff;
-        }
-
-        input {
-            color: #ece8e8;
-            background-color: #2e2e2e;
-            border: none;
-            outline: none;
-            height: 30px;
-            width: 300px;
-            margin-bottom: 10px;
-            padding: 5px;
-            text-align: center;
-        }
-
-        canvas {
-            background-color: #fff;
-            border: 2px solid #ababab;
-        }
-
-        button {
-            margin-top: 10px;
-            padding: 10px 20px;
-            background-color: #2e2e2e;
-            color: #fff;
-            border: none;
-            cursor: pointer;
-        }
-
-        button:hover {
-            background-color: #3e3e3e;
-        }
-    </style>
+    <title>Generador de Imagen</title>
 </head>
 <body>
-    <h1>Genera Imagen Base64 desde Texto</h1>
-    <input type="text" id="textInput" placeholder="Escribe algo..." />
-    <button id="generateBtn">Generar Imagen</button>
-    
-    <canvas id="canvas" width="500" height="200"></canvas>
-    <div id="result"></div>
+    <canvas id="board" width="500" height="500"></canvas>
+    <input type="text" id="text" placeholder="Escribe aquí el texto">
+    <div id="check"></div>
+    <button id="download">Descargar Imagen</button>
 
     <script>
-        document.getElementById("generateBtn").addEventListener("click", function() {
-            const text = document.getElementById("textInput").value || "Texto por defecto";
-            
-            // Dibuja el texto en el canvas
-            const canvas = document.getElementById("canvas");
-            const ctx = canvas.getContext("2d");
-            ctx.clearRect(0, 0, canvas.width, canvas.height); ñ
+        const canvas = document.getElementById("board");
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#FFFFFF"; // Fondo blanco
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "black";
+        ctx.filter = "blur(1.5px)";
+        let check = document.getElementById("check");
+        ctx.font = "75px Arial Narrow";
+
+        setInterval(() => {
+            ctx.clearRect(0, 0, 500, 500);
+            ctx.fillStyle = "#FFFFFF"; // Fondo blanco
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
             ctx.fillStyle = "black";
-            ctx.font = "30px Arial";
-            ctx.fillText(text, 50, 100); 
-            const base64Image = canvas.toDataURL("image/png");
-            const resultDiv = document.getElementById("result");
-            resultDiv.innerHTML = `<img src="${base64Image}" alt="Imagen generada" />`;
-            fetch(`/api/json?text=${encodeURIComponent(text)}`)
-                .then(response => response.json())
-                .then(data => {
-                    console.log(data);
-                })
-                .catch(error => console.error('Error:', error));
-        });
+            let text = document.querySelector("#text").value || "brat";
+            check.innerHTML = text;
+            let width = check.getBoundingClientRect().width;
+            ctx.save();
+            ctx.scale(100 / 135, 1);
+            ctx.textAlign = "center";
+            let textArray = text.split("\n");
+            let tick = 0;
+            let margin = (400 - textArray.length * 75) / 2;
+
+            textArray.forEach((a) => {
+                ctx.fillText(a, canvas.width / 2 * (135 / 100), margin + 75 * tick + 60);
+                tick++;
+            });
+            ctx.restore();
+        }, 200);
+
+        function downloadBrat() {
+            var canvas1 = document.getElementById("board");
+
+            var imageObject = new Image();
+            imageObject.src = canvas1.toDataURL("image/png");
+
+            var imageElement = document.createElement("img");
+            imageElement.src = imageObject.src;
+
+            let link = document.createElement("a");
+            link.setAttribute('download', "download");
+            link.href = imageElement.src;
+            link.click();
+        }
+
+        document.querySelector("#download").addEventListener("click", downloadBrat);
     </script>
 </body>
 </html>
