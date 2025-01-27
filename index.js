@@ -1,4 +1,4 @@
-const express = require("express");
+ const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const { createCanvas } = require("canvas");
@@ -14,14 +14,12 @@ if (!fs.existsSync(IMAGE_FOLDER)) {
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/json", (req, res) => {
-    const text = req.query.text || "Quiero pene de samu";  // Texto por defecto
+    const text = req.query.text || "brat";  // Texto por defecto
     const imgCanvas = createCanvas(500, 500);  // Crear un canvas de 500x500
     const ctx = imgCanvas.getContext("2d");
 
-    // Limpiar el canvas
+    // Limpiar el canvas y establecer el fondo blanco
     ctx.clearRect(0, 0, imgCanvas.width, imgCanvas.height);
-
-    // Fondo blanco
     ctx.fillStyle = "#FFFFFF";  // Fondo blanco
     ctx.fillRect(0, 0, imgCanvas.width, imgCanvas.height);
 
@@ -30,31 +28,13 @@ app.get("/api/json", (req, res) => {
     ctx.font = "75px Arial Narrow";  // Fuente de texto
 
     // Dividir el texto en líneas si es necesario
-    let lines = [];
-    let line = "";
-    const lineHeight = 75;
-    const maxWidth = 400;  // Ancho máximo para el texto
-
-    // Ajustar el texto para que quepa en el canvas
-    for (let i = 0; i < text.length; i++) {
-        line += text[i];
-        const width = ctx.measureText(line).width;
-        if (width > maxWidth) {
-            lines.push(line.substring(0, line.length - 1));  // Agregar la línea anterior
-            line = text[i];  // Comenzar una nueva línea
-        }
-    }
-    lines.push(line);  // Agregar la última línea
-
-    // Ajustar la posición para que el texto comience más arriba
-    const totalHeight = lines.length * lineHeight;
-    const marginTop = 50;  // Margen superior (ajusta según lo que necesites)
-    let y = marginTop;  // Establecer la posición Y inicial
+    let textArray = text.split("\n");
+    let tick = 0;
+    const margin = (400 - textArray.length * 75) / 2;  // Centrar el texto
 
     // Escribir el texto en el canvas
-    let tick = 0;
-    lines.forEach((lineText) => {
-        ctx.fillText(lineText, imgCanvas.width / 2, y + 75 * tick);
+    textArray.forEach((lineText) => {
+        ctx.fillText(lineText, imgCanvas.width / 2, margin + 75 * tick + 60);  // Posición ajustada
         tick++;
     });
 
@@ -75,3 +55,4 @@ app.get("/api/json", (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
+       
