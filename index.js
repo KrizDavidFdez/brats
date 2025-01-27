@@ -14,7 +14,7 @@ if (!fs.existsSync(IMAGE_FOLDER)) {
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/json", (req, res) => {
-    const text = req.query.text || "brat";  // Texto por defecto
+    const text = req.query.text || "Hola\nSoy\nMateo";  // Texto por defecto con saltos de línea
     const imgCanvas = createCanvas(500, 500);  // Crear un canvas de 500x500
     const ctx = imgCanvas.getContext("2d");
 
@@ -27,7 +27,7 @@ app.get("/api/json", (req, res) => {
     ctx.fillStyle = "black";
     ctx.font = "75px Arial Narrow";  // Fuente de texto
 
-    // Dividir el texto en líneas si es necesario
+    // Dividir el texto en líneas si es necesario, manteniendo los saltos de línea
     let textArray = text.split("\n");
     let tick = 0;
     const lineHeight = 75;
@@ -61,3 +61,4 @@ app.get("/api/json", (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
+
