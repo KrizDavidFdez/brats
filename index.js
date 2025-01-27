@@ -46,14 +46,15 @@ app.get("/api/json", (req, res) => {
     }
     lines.push(line);  // Agregar la última línea
 
-    // Centrar el texto en el canvas
+    // Ajustar la posición para que el texto comience más arriba
     const totalHeight = lines.length * lineHeight;
-    let y = (imgCanvas.height - totalHeight) / 2;  // Centramos verticalmente
+    const marginTop = 50;  // Margen superior (ajusta según lo que necesites)
+    let y = marginTop;  // Establecer la posición Y inicial
 
     // Escribir el texto en el canvas
     let tick = 0;
     lines.forEach((lineText) => {
-        ctx.fillText(lineText, imgCanvas.width / 2, y + 60 + 75 * tick);
+        ctx.fillText(lineText, imgCanvas.width / 2, y + 75 * tick);
         tick++;
     });
 
