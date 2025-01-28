@@ -17,38 +17,67 @@ app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
 
 app.post("/api/json", (req, res) => {
-    const text = req.body.text || "brat";  // Texto por defecto
-    const imgCanvas = createCanvas(500, 500);  // Crear un canvas de 500x500
-    const ctx = imgCanvas.getContext("2d");
+    const text = req.body.text || "brat"; // Texto por defecto
+
+    // Crear un canvas de menor resolución para el efecto pixelado
+    const smallCanvas = createCanvas(250, 250); // Canvas pequeño
+    const ctx = smallCanvas.getContext("2d");
 
     // Limpiar el canvas y establecer el fondo blanco
-    ctx.clearRect(0, 0, imgCanvas.width, imgCanvas.height);
-    ctx.fillStyle = "#FFFFFF";  // Fondo blanco
-    ctx.fillRect(0, 0, imgCanvas.width, imgCanvas.height);
+    ctx.clearRect(0, 0, smallCanvas.width, smallCanvas.height);
+    ctx.fillStyle = "#FFFFFF"; // Fondo blanco
+    ctx.fillRect(0, 0, smallCanvas.width, smallCanvas.height);
 
     // Establecer color y fuente
     ctx.fillStyle = "black";
-    ctx.font = "75px Arial Narrow";  // Fuente de texto
+    ctx.font = "16px Arial Narrow"; // Fuente de texto más pequeña para el canvas pequeño
 
-    // Dividir el texto en líneas si es necesario (usando saltos de línea)
-    let textArray = text.split("\n");
-    let tick = 0;
-    const lineHeight = 75;  // Altura de cada línea de texto
+    // Función para dividir el texto en líneas
+    const wrapText = (context, text, maxWidth) => {
+        const words = text.split(" ");
+        let lines = [];
+        let currentLine = words[0];
+
+        for (let i = 1; i < words.length; i++) {
+            const word = words[i];
+            const width = context.measureText(currentLine + " " + word).width;
+            if (width < maxWidth) {
+                currentLine += " " + word;
+            } else {
+                lines.push(currentLine);
+                currentLine = word;
+            }
+        }
+        lines.push(currentLine);
+        return lines;
+    };
+
+    // Dividir el texto automáticamente
+    const maxLineWidth = 200; // Ancho máximo para cada línea
+    const textArray = wrapText(ctx, text, maxLineWidth);
+
+    // Posicionar el texto en el canvas pequeño
+    const lineHeight = 20; // Altura de cada línea
     const totalTextHeight = textArray.length * lineHeight;
-    const startY = (imgCanvas.height - totalTextHeight) / 2;  // Iniciar en el centro verticalmente
+    const startY = (smallCanvas.height - totalTextHeight) / 2; // Centrado verticalmente
 
-    // Escribir el texto en el canvas
-    textArray.forEach((lineText) => {
-        const textWidth = ctx.measureText(lineText).width;  // Medir el ancho del texto
-        const startX = (imgCanvas.width - textWidth) / 2;  // Centrar el texto horizontalmente
-        ctx.fillText(lineText, startX, startY + lineHeight * tick);
-        tick++;
+    textArray.forEach((lineText, index) => {
+        const textWidth = ctx.measureText(lineText).width;
+        const startX = (smallCanvas.width - textWidth) / 2; // Centrado horizontalmente
+        ctx.fillText(lineText, startX, startY + lineHeight * index);
     });
+
+    // Crear un canvas más grande para escalar y pixelar
+    const largeCanvas = createCanvas(500, 500);
+    const largeCtx = largeCanvas.getContext("2d");
+
+    // Escalar el canvas pequeño al tamaño grande para el efecto pixelado
+    largeCtx.drawImage(smallCanvas, 0, 0, largeCanvas.width, largeCanvas.height);
 
     // Guardar la imagen en el servidor
     const imagePath = path.join(IMAGE_FOLDER, `image_${Date.now()}.png`);
     const out = fs.createWriteStream(imagePath);
-    const stream = imgCanvas.createPNGStream();
+    const stream = largeCanvas.createPNGStream();
     stream.pipe(out);
 
     out.on("finish", () => {
@@ -62,4 +91,3 @@ app.post("/api/json", (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
-            
