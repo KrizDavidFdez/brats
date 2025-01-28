@@ -1,4 +1,4 @@
-const express = require("express");
+ const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const { createCanvas } = require("canvas");
@@ -28,9 +28,9 @@ app.post("/api/json", (req, res) => {
     ctx.fillStyle = "#FFFFFF"; // Fondo blanco
     ctx.fillRect(0, 0, smallCanvas.width, smallCanvas.height);
 
-    // Establecer color y fuente
+    // Establecer color y fuente con mayor tamaño de letra
     ctx.fillStyle = "black";
-    ctx.font = "16px Arial Narrow"; // Fuente de texto más pequeña para el canvas pequeño
+    ctx.font = "24px Arial Narrow"; // Fuente de texto más grande
 
     // Función para dividir el texto en líneas
     const wrapText = (context, text, maxWidth) => {
@@ -57,7 +57,7 @@ app.post("/api/json", (req, res) => {
     const textArray = wrapText(ctx, text, maxLineWidth);
 
     // Posicionar el texto en el canvas pequeño
-    const lineHeight = 20; // Altura de cada línea
+    const lineHeight = 30; // Altura de cada línea más grande
     const totalTextHeight = textArray.length * lineHeight;
     const startY = (smallCanvas.height - totalTextHeight) / 2; // Centrado verticalmente
 
@@ -91,3 +91,4 @@ app.post("/api/json", (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
+       
