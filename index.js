@@ -19,9 +19,9 @@ app.use(express.json());
 async function ytdls(query, desiredQuality) {
     const searchUrl = "https://ssvid.net/api/ajax/search";
     const convertUrl = "https://ssvid.net/api/ajax/convert";
+    const searchBody = `query=${encodeURIComponent(query)}&vt=home`;
 
     try {
-        const searchBody = `query=${encodeURIComponent(query)}&vt=home`;
         const searchResponse = await fetch(searchUrl, {
             method: "POST",
             headers: {
@@ -33,19 +33,7 @@ async function ytdls(query, desiredQuality) {
         const searchData = await searchResponse.json();
         const vid = searchData.vid;
         const title = searchData.title;
-        const highQualityThumbnail = `https://img.youtube.com/vi/${vid}/maxresdefault.jpg`;
-        const mediumQualityThumbnail = `https://img.youtube.com/vi/${vid}/sddefault.jpg`;
-        const lowQualityThumbnail = `https://img.youtube.com/vi/${vid}/default.jpg`;
-        let thumbnailUrl = highQualityThumbnail;
-        const highResponse = await fetch(highQualityThumbnail).catch(() => '');
-        if (!highResponse || !highResponse.ok) {
-            const mediumResponse = await fetch(mediumQualityThumbnail).catch(() => '');
-            if (mediumResponse && mediumResponse.ok) {
-                thumbnailUrl = mediumQualityThumbnail;
-            } else {
-                thumbnailUrl = lowQualityThumbnail;
-            }
-        }
+
         const qualityMap = {
             "360p": "134",
             "720p": "136",
@@ -66,9 +54,9 @@ async function ytdls(query, desiredQuality) {
         };
 
         const videoQuality = parsedLinks.mp4[qualityKey] || parsedLinks.mp3[qualityKey];
-
         const { k, size } = videoQuality;
         const convertBody = `vid=${vid}&k=${encodeURIComponent(k)}`;
+
         const convertResponse = await fetch(convertUrl, {
             method: "POST",
             headers: {
@@ -77,19 +65,23 @@ async function ytdls(query, desiredQuality) {
             },
             body: convertBody
         });
+
         const conversionResult = await convertResponse.json();
+        const thumbnailUrl = `https://img.youtube.com/vi/${vid}/hqdefault.jpg`;
         return {
             creator: "@Samush$_",
             data: {
                 title,
                 size,
-                thumbnail: thumbnailUrl,
                 vid,
+                thumbnail: thumbnailUrl,
                 dl_url: conversionResult.dlink
             }
         };
     } catch (error) {
-    }}
+        
+    }
+}
 
 app.get('/starlight/youtube-mp3', async (req, res) => {
   //  actualizarStats(req);
