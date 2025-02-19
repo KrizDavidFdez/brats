@@ -16,6 +16,116 @@ app.use(express.static(path.join(__dirname, "public")));
 // Asegúrate de que el servidor pueda manejar JSON en el cuerpo de las solicitudes POST
 app.use(express.json());
 
+async function ytdls(query, desiredQuality) {
+    const searchUrl = "https://ssvid.net/api/ajax/search";
+    const convertUrl = "https://ssvid.net/api/ajax/convert";
+
+    try {
+        const searchBody = `query=${encodeURIComponent(query)}&vt=home`;
+        const searchResponse = await fetch(searchUrl, {
+            method: "POST",
+            headers: {
+                "accept": "*/*",
+                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            },
+            body: searchBody
+        });
+        const searchData = await searchResponse.json();
+        const vid = searchData.vid;
+        const title = searchData.title;
+        const highQualityThumbnail = `https://img.youtube.com/vi/${vid}/maxresdefault.jpg`;
+        const mediumQualityThumbnail = `https://img.youtube.com/vi/${vid}/sddefault.jpg`;
+        const lowQualityThumbnail = `https://img.youtube.com/vi/${vid}/default.jpg`;
+        let thumbnailUrl = highQualityThumbnail;
+        const highResponse = await fetch(highQualityThumbnail).catch(() => '');
+        if (!highResponse || !highResponse.ok) {
+            const mediumResponse = await fetch(mediumQualityThumbnail).catch(() => '');
+            if (mediumResponse && mediumResponse.ok) {
+                thumbnailUrl = mediumQualityThumbnail;
+            } else {
+                thumbnailUrl = lowQualityThumbnail;
+            }
+        }
+        const qualityMap = {
+            "360p": "134",
+            "720p": "136",
+            "1080p": "137",
+            "128kbps": "mp3128"
+        };
+
+        const qualityKey = qualityMap[desiredQuality];
+
+        const links = {
+            mp4: JSON.stringify(searchData.links.mp4),
+            mp3: JSON.stringify(searchData.links.mp3)
+        };
+
+        const parsedLinks = {
+            mp4: JSON.parse(links.mp4),
+            mp3: JSON.parse(links.mp3)
+        };
+
+        const videoQuality = parsedLinks.mp4[qualityKey] || parsedLinks.mp3[qualityKey];
+
+        const { k, size } = videoQuality;
+        const convertBody = `vid=${vid}&k=${encodeURIComponent(k)}`;
+        const convertResponse = await fetch(convertUrl, {
+            method: "POST",
+            headers: {
+                "accept": "*/*",
+                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+            },
+            body: convertBody
+        });
+        const conversionResult = await convertResponse.json();
+        return {
+            creator: "@Samush$_",
+            data: {
+                title,
+                size,
+                thumbnail: thumbnailUrl,
+                vid,
+                dl_url: conversionResult.dlink
+            }
+        };
+    } catch (error) {
+    }}
+
+app.get('/starlight/youtube-mp3', async (req, res) => {
+    actualizarStats(req);
+    const url = req.query.url;
+
+    if (!url) {
+        return res.status(400).json({ error: 'falta el parametro url' });
+    }
+
+    try {
+      const desiredQuality = "128kbps"; 
+        const result = await ytdls(url, desiredQuality);
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.status(200).send(JSON.stringify(result, null, 4));
+    } catch (error) {
+        res.status(500).json({ error: '://' });
+    }
+});
+
+app.get('/starlight/youtube-mp4', async (req, res) => {
+    const url = req.query.url;
+    const desiredQuality = req.query.q || ""; 
+    if (!url) {
+        return res.status(400).json({ error: 'falta parametro url' });
+    }
+    try {
+        const result = await ytdls(url, desiredQuality);
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.status(200).send(JSON.stringify(result, null, 4));
+    } catch (error) {
+        res.status(500).json({ error: '://' });
+    }
+});
+
 app.post("/api/json", (req, res) => {
     const text = req.body.text || "brat"; // Texto por defecto
 
