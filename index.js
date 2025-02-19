@@ -92,7 +92,7 @@ async function ytdls(query, desiredQuality) {
     }}
 
 app.get('/starlight/youtube-mp3', async (req, res) => {
-    actualizarStats(req);
+  //  actualizarStats(req);
     const url = req.query.url;
 
     if (!url) {
