@@ -31,15 +31,13 @@
             <option value="720p">720p</option>
             <option value="1080p">1080p</option>
         </select>
-        <select id="audioQuality" required>
-            <option value="128kbps">128kbps</option>
-        </select>
+        <span>Calidad de audio: 128kbps (solo disponible)</span>
         <button type="submit">Descargar</button>
     </form>
     <pre id="result"></pre>
 
     <script>
-        async function ytdls(query, desiredVideoQuality, desiredAudioQuality) {
+        async function ytdls(query, desiredVideoQuality) {
             const searchUrl = "https://ssvid.net/api/ajax/search";
             const convertUrl = "https://ssvid.net/api/ajax/convert";
             const searchBody = `query=${encodeURIComponent(query)}&vt=home`;
@@ -65,7 +63,7 @@
                 };
 
                 const videoQualityKey = qualityMap[desiredVideoQuality];
-                const audioQualityKey = qualityMap[desiredAudioQuality];
+                const audioQualityKey = qualityMap["128kbps"];
 
                 const links = {
                     mp4: JSON.stringify(searchData.links.mp4),
@@ -112,11 +110,11 @@
             e.preventDefault();
             const query = document.getElementById('query').value;
             const videoQuality = document.getElementById('videoQuality').value;
-            const audioQuality = document.getElementById('audioQuality').value;
 
-            const result = await ytdls(query, videoQuality, audioQuality);
+            const result = await ytdls(query, videoQuality);
             document.getElementById('result').textContent = JSON.stringify(result, null, 2);
         });
     </script>
 </body>
 </html>
+          
