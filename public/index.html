@@ -46,18 +46,25 @@
                     body: searchBody
                 });
                 const searchData = await searchResponse.json();
+
+                if (!searchData || !searchData.vid || !searchData.links) {
+                    throw new Error("Datos de búsqueda no válidos.");
+                }
+
                 const vid = searchData.vid;
                 const title = searchData.title;
-
                 const links = {
                     mp3: JSON.stringify(searchData.links.mp3)
                 };
-
                 const parsedLinks = {
                     mp3: JSON.parse(links.mp3)
                 };
 
                 const audioQuality = parsedLinks.mp3["mp3128"];
+                if (!audioQuality) {
+                    throw new Error("Calidad de audio no disponible.");
+                }
+
                 const { k, size } = audioQuality;
                 const convertBody = `vid=${vid}&k=${encodeURIComponent(k)}`;
 
@@ -96,3 +103,4 @@
     </script>
 </body>
 </html>
+                    
