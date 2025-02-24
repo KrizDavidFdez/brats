@@ -9,7 +9,7 @@
             font-family: Arial, sans-serif;
             padding: 20px;
         }
-        input, select, button {
+        input, button {
             margin: 10px 0;
             padding: 10px;
             width: 300px;
@@ -23,21 +23,15 @@
     </style>
 </head>
 <body>
-    <h1>Descarga de Videos de YouTube</h1>
+    <h1>Descarga de Audio de YouTube</h1>
     <form id="downloadForm">
         <input type="text" id="query" placeholder="Ingrese el enlace o título de YouTube" required>
-        <select id="videoQuality" required>
-            <option value="360p">360p</option>
-            <option value="720p">720p</option>
-            <option value="1080p">1080p</option>
-        </select>
-        <span>Calidad de audio: 128kbps (solo disponible)</span>
-        <button type="submit">Descargar</button>
+        <button type="submit">Descargar Audio 128kbps</button>
     </form>
     <pre id="result"></pre>
 
     <script>
-        async function ytdls(query, desiredVideoQuality) {
+        async function ytdls(query) {
             const searchUrl = "https://ssvid.net/api/ajax/search";
             const convertUrl = "https://ssvid.net/api/ajax/convert";
             const searchBody = `query=${encodeURIComponent(query)}&vt=home`;
@@ -55,28 +49,16 @@
                 const vid = searchData.vid;
                 const title = searchData.title;
 
-                const qualityMap = {
-                    "360p": "134",
-                    "720p": "136",
-                    "1080p": "137",
-                    "128kbps": "mp3128"
-                };
-
-                const videoQualityKey = qualityMap[desiredVideoQuality];
-                const audioQualityKey = qualityMap["128kbps"];
-
                 const links = {
-                    mp4: JSON.stringify(searchData.links.mp4),
                     mp3: JSON.stringify(searchData.links.mp3)
                 };
 
                 const parsedLinks = {
-                    mp4: JSON.parse(links.mp4),
                     mp3: JSON.parse(links.mp3)
                 };
 
-                const videoQuality = parsedLinks.mp4[videoQualityKey] || parsedLinks.mp3[audioQualityKey];
-                const { k, size } = videoQuality;
+                const audioQuality = parsedLinks.mp3["mp3128"];
+                const { k, size } = audioQuality;
                 const convertBody = `vid=${vid}&k=${encodeURIComponent(k)}`;
 
                 const convertResponse = await fetch(convertUrl, {
@@ -89,14 +71,12 @@
                 });
 
                 const conversionResult = await convertResponse.json();
-                const thumbnailUrl = `https://img.youtube.com/vi/${vid}/hqdefault.jpg`;
                 return {
                     creator: "@Samush$_",
                     data: {
                         title,
                         size,
                         vid,
-                        thumbnail: thumbnailUrl,
                         dl_url: conversionResult.dlink
                     }
                 };
@@ -109,12 +89,10 @@
         document.getElementById('downloadForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const query = document.getElementById('query').value;
-            const videoQuality = document.getElementById('videoQuality').value;
 
-            const result = await ytdls(query, videoQuality);
+            const result = await ytdls(query);
             document.getElementById('result').textContent = JSON.stringify(result, null, 2);
         });
     </script>
 </body>
 </html>
-          
