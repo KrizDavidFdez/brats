@@ -14,23 +14,32 @@
             padding: 10px;
             width: 300px;
         }
+        pre {
+            background-color: #f4f4f4;
+            padding: 10px;
+            border: 1px solid #ccc;
+            overflow: auto;
+        }
     </style>
 </head>
 <body>
     <h1>Descarga de Videos de YouTube</h1>
     <form id="downloadForm">
         <input type="text" id="query" placeholder="Ingrese el enlace o título de YouTube" required>
-        <select id="quality" required>
+        <select id="videoQuality" required>
             <option value="360p">360p</option>
             <option value="720p">720p</option>
             <option value="1080p">1080p</option>
+        </select>
+        <select id="audioQuality" required>
+            <option value="128kbps">128kbps</option>
         </select>
         <button type="submit">Descargar</button>
     </form>
     <pre id="result"></pre>
 
     <script>
-        async function ytdls(query, desiredQuality) {
+        async function ytdls(query, desiredVideoQuality, desiredAudioQuality) {
             const searchUrl = "https://ssvid.net/api/ajax/search";
             const convertUrl = "https://ssvid.net/api/ajax/convert";
             const searchBody = `query=${encodeURIComponent(query)}&vt=home`;
@@ -55,7 +64,8 @@
                     "128kbps": "mp3128"
                 };
 
-                const qualityKey = qualityMap[desiredQuality];
+                const videoQualityKey = qualityMap[desiredVideoQuality];
+                const audioQualityKey = qualityMap[desiredAudioQuality];
 
                 const links = {
                     mp4: JSON.stringify(searchData.links.mp4),
@@ -67,7 +77,7 @@
                     mp3: JSON.parse(links.mp3)
                 };
 
-                const videoQuality = parsedLinks.mp4[qualityKey] || parsedLinks.mp3["mp3128"];
+                const videoQuality = parsedLinks.mp4[videoQualityKey] || parsedLinks.mp3[audioQualityKey];
                 const { k, size } = videoQuality;
                 const convertBody = `vid=${vid}&k=${encodeURIComponent(k)}`;
 
@@ -94,15 +104,17 @@
                 };
             } catch (error) {
                 console.error("Error:", error);
+                return { error: "Ocurrió un error durante la descarga." };
             }
         }
 
         document.getElementById('downloadForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const query = document.getElementById('query').value;
-            const quality = document.getElementById('quality').value;
+            const videoQuality = document.getElementById('videoQuality').value;
+            const audioQuality = document.getElementById('audioQuality').value;
 
-            const result = await ytdls(query, quality);
+            const result = await ytdls(query, videoQuality, audioQuality);
             document.getElementById('result').textContent = JSON.stringify(result, null, 2);
         });
     </script>
