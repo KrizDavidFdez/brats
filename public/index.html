@@ -1,65 +1,110 @@
-            <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Generador de Imagen</title>
+    <title>Descargas de YouTube</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+        }
+        input, select, button {
+            margin: 10px 0;
+            padding: 10px;
+            width: 300px;
+        }
+    </style>
 </head>
 <body>
-    <canvas id="board" width="500" height="500"></canvas>
-    <input type="text" id="text" placeholder="Escribe aquí el texto">
-    <div id="check"></div>
-    <button id="download">Descargar Imagen</button>
+    <h1>Descarga de Videos de YouTube</h1>
+    <form id="downloadForm">
+        <input type="text" id="query" placeholder="Ingrese el enlace o título de YouTube" required>
+        <select id="quality" required>
+            <option value="360p">360p</option>
+            <option value="720p">720p</option>
+            <option value="1080p">1080p</option>
+        </select>
+        <button type="submit">Descargar</button>
+    </form>
+    <pre id="result"></pre>
 
     <script>
-        const canvas = document.getElementById("board");
-        const ctx = canvas.getContext("2d");
-        ctx.fillStyle = "#FFFFFF"; // Fondo blanco
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        async function ytdls(query, desiredQuality) {
+            const searchUrl = "https://ssvid.net/api/ajax/search";
+            const convertUrl = "https://ssvid.net/api/ajax/convert";
+            const searchBody = `query=${encodeURIComponent(query)}&vt=home`;
 
-        ctx.fillStyle = "black";
-        ctx.filter = "blur(1.5px)";
-        let check = document.getElementById("check");
-        ctx.font = "75px Arial Narrow";
+            try {
+                const searchResponse = await fetch(searchUrl, {
+                    method: "POST",
+                    headers: {
+                        "accept": "*/*",
+                        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    },
+                    body: searchBody
+                });
+                const searchData = await searchResponse.json();
+                const vid = searchData.vid;
+                const title = searchData.title;
 
-        setInterval(() => {
-            ctx.clearRect(0, 0, 500, 500);
-            ctx.fillStyle = "#FFFFFF"; // Fondo blanco
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.fillStyle = "black";
-            let text = document.querySelector("#text").value || "brat";
-            check.innerHTML = text;
-            let width = check.getBoundingClientRect().width;
-            ctx.save();
-            ctx.scale(100 / 135, 1);
-            ctx.textAlign = "center";
-            let textArray = text.split("\n");
-            let tick = 0;
-            let margin = (400 - textArray.length * 75) / 2;
+                const qualityMap = {
+                    "360p": "134",
+                    "720p": "136",
+                    "1080p": "137",
+                    "128kbps": "mp3128"
+                };
 
-            textArray.forEach((a) => {
-                ctx.fillText(a, canvas.width / 2 * (135 / 100), margin + 75 * tick + 60);
-                tick++;
-            });
-            ctx.restore();
-        }, 200);
+                const qualityKey = qualityMap[desiredQuality];
 
-        function downloadBrat() {
-            var canvas1 = document.getElementById("board");
+                const links = {
+                    mp4: JSON.stringify(searchData.links.mp4),
+                    mp3: JSON.stringify(searchData.links.mp3)
+                };
 
-            var imageObject = new Image();
-            imageObject.src = canvas1.toDataURL("image/png");
+                const parsedLinks = {
+                    mp4: JSON.parse(links.mp4),
+                    mp3: JSON.parse(links.mp3)
+                };
 
-            var imageElement = document.createElement("img");
-            imageElement.src = imageObject.src;
+                const videoQuality = parsedLinks.mp4[qualityKey] || parsedLinks.mp3["mp3128"];
+                const { k, size } = videoQuality;
+                const convertBody = `vid=${vid}&k=${encodeURIComponent(k)}`;
 
-            let link = document.createElement("a");
-            link.setAttribute('download', "download");
-            link.href = imageElement.src;
-            link.click();
+                const convertResponse = await fetch(convertUrl, {
+                    method: "POST",
+                    headers: {
+                        "accept": "*/*",
+                        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    },
+                    body: convertBody
+                });
+
+                const conversionResult = await convertResponse.json();
+                const thumbnailUrl = `https://img.youtube.com/vi/${vid}/hqdefault.jpg`;
+                return {
+                    creator: "@Samush$_",
+                    data: {
+                        title,
+                        size,
+                        vid,
+                        thumbnail: thumbnailUrl,
+                        dl_url: conversionResult.dlink
+                    }
+                };
+            } catch (error) {
+                console.error("Error:", error);
+            }
         }
 
-        document.querySelector("#download").addEventListener("click", downloadBrat);
+        document.getElementById('downloadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const query = document.getElementById('query').value;
+            const quality = document.getElementById('quality').value;
+
+            const result = await ytdls(query, quality);
+            document.getElementById('result').textContent = JSON.stringify(result, null, 2);
+        });
     </script>
 </body>
 </html>
