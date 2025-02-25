@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Descargas de YouTube</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+        }
+        input, button {
+            margin: 10px 0;
+            padding: 10px;
+            width: 300px;
+        }
+        pre {
+            background-color: #f4f4f4;
+            padding: 10px;
+            border: 1px solid #ccc;
+            overflow: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Descarga de Audio de YouTube</h1>
+    <form id="downloadForm">
+        <input type="text" id="query" placeholder="Ingrese el enlace o título de YouTube" required>
+        <button type="submit">Descargar Audio 128kbps</button>
+    </form>
+    <pre id="result"></pre>
+
+    <script>
+        async function ytdls(videoUrl) {
+    async function shortlink(url) {
+        const response = await axios.get(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(url)}`);
+        return response.data;
+    }
+    const oembedResponse = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(videoUrl)}&format=json`, {
+        headers: {
+            "accept": "*/*",
+            "accept-language": "es-US,es-419;q=0.9,es;q=0.8",
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+            "sec-ch-ua": "\"Not A(Brand\";v=\"8\", \"Chromium\";v=\"132\"",
+            "sec-ch-ua-mobile": "?1",
+            "sec-ch-ua-platform": "\"Android\"",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+            "Referer": "https://y2meta.mobi/",
+            "Referrer-Policy": "strict-origin-when-cross-origin"
+        },
+        method: "GET"
+    });
+
+    const oembedData = await oembedResponse.json();
+    const downloadResponse = await fetch(`https://p.oceansaver.in/ajax/download.php?copyright=0&format=mp3&url=${encodeURIComponent(videoUrl)}&api=30de256ad09118bd6b60a13de631ae2cea6e5f9d`, {
+        headers: {
+            "accept": "*/*",
+            "accept-language": "es-US,es-419;q=0.9,es;q=0.8",
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+            "sec-ch-ua": "\"Not A(Brand\";v=\"8\", \"Chromium\";v=\"132\"",
+            "sec-ch-ua-mobile": "?1",
+            "sec-ch-ua-platform": "\"Android\"",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+            "Referer": "https://y2meta.mobi/",
+            "Referrer-Policy": "strict-origin-when-cross-origin"
+        },
+        method: "GET"
+    });
+
+    const downloadData = await downloadResponse.json();
+    const downloadId = downloadData.id;
+    let progressData;
+    do {
+        const progressResponse = await fetch(`https://p.oceansaver.in/ajax/progress.php?id=${downloadId}`, {
+            headers: {
+                "accept": "*/*",
+                "accept-language": "es-US,es-419;q=0.9,es;q=0.8",
+                "cache-control": "no-cache",
+                "pragma": "no-cache",
+                "sec-ch-ua": "\"Not A(Brand\";v=\"8\", \"Chromium\";v=\"132\"",
+                "sec-ch-ua-mobile": "?1",
+                "sec-ch-ua-platform": "\"Android\"",
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "cross-site"
+            },
+            referrer: "https://y2meta.mobi/",
+            referrerPolicy: "strict-origin-when-cross-origin",
+            method: "GET"
+        });
+        progressData = await progressResponse.json();
+    } while (progressData.progress < 1000);
+    const tinyUrl = await shortlink(progressData.download_url);
+
+    return {
+        creator: "@Samush$_",
+        data: {
+            title: oembedData.title,
+            author_name: oembedData.author_name,
+            thumbnail: oembedData.thumbnail_url,
+            author_url: oembedData.author_url,
+            provider: oembedData.provider_url,
+            dl_url: tinyUrl 
+        }
+    };
+}
+
+        document.getElementById('downloadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const query = document.getElementById('videoUrl').value;
+
+            const result = await ytdls(videoUrl);
+            document.getElementById('result').textContent = JSON.stringify(result, null, 2);
+        });
+    </script>
+</body>
+</html>
+                    
