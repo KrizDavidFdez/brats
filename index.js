@@ -1,6 +1,5 @@
 const express = require("express");
 const path = require("path");
-const fs = require("fs");
 const https = require("https");
 const cheerio = require("cheerio");
 const { createCanvas, loadImage, registerFont } = require("canvas");
@@ -11,12 +10,6 @@ const PORT = 3333;
 registerFont(path.join(__dirname, "./fonts/SF-Pro.ttf"), { family: "SFProDisplay" });
 registerFont(path.join(__dirname, "./fonts/monospace.ttf"), { family: "SFProText" });
 
-const IMAGE_FOLDER = path.join(__dirname, "public", "images");
-if (!fs.existsSync(IMAGE_FOLDER)) {
-    fs.mkdirSync(IMAGE_FOLDER, { recursive: true });
-}
-
-app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
 
 function httpsGet(url) {
@@ -63,22 +56,18 @@ app.post("/api/applemusic", async (req, res) => {
             duracion: formatDuration(audio.duration || json.timeRequired) || "0:00",
         };
 
+        // Cargar imágenes
         const baseUrl = "https://raw.githubusercontent.com/IrokzDal/uploads/main/1758134360746.jpeg";
-        const baseBuffer = await new Promise((resolve, reject) => {
-            https.get(baseUrl, (r) => {
+        const loadBuffer = (url) => new Promise((resolve, reject) => {
+            https.get(url, (r) => {
                 const chunks = [];
                 r.on("data", (c) => chunks.push(c));
                 r.on("end", () => resolve(Buffer.concat(chunks)));
             }).on("error", reject);
         });
 
-        const coverBuffer = await new Promise((resolve, reject) => {
-            https.get(info.imagen, (r) => {
-                const chunks = [];
-                r.on("data", (c) => chunks.push(c));
-                r.on("end", () => resolve(Buffer.concat(chunks)));
-            }).on("error", reject);
-        });
+        const baseBuffer = await loadBuffer(baseUrl);
+        const coverBuffer = await loadBuffer(info.imagen);
 
         const base = await loadImage(baseBuffer);
         const cover = await loadImage(coverBuffer);
@@ -87,6 +76,7 @@ app.post("/api/applemusic", async (req, res) => {
         const canvas = createCanvas(width, height);
         const ctx = canvas.getContext("2d");
 
+        // Coordenadas y estilos
         const coverX = 300;
         const coverY = 580;
         const coverSize = 1600;
@@ -94,6 +84,8 @@ app.post("/api/applemusic", async (req, res) => {
         const fadeArtist = 0.7;
         const radius = 60;
         const currentTime = `0:${Math.floor(Math.random() * 8) + 3}`;
+
+        // Dibujo
         ctx.drawImage(base, 0, 0, width, height);
         ctx.save();
         ctx.beginPath();
@@ -110,6 +102,7 @@ app.post("/api/applemusic", async (req, res) => {
         ctx.clip();
         ctx.drawImage(cover, coverX, coverY, coverSize, coverSize);
         ctx.restore();
+
         ctx.fillStyle = "#fff";
         ctx.font = "bold 90px SFProDisplay";
         ctx.fillText(info.titulo, coverX, textOffsetY);
@@ -124,26 +117,24 @@ app.post("/api/applemusic", async (req, res) => {
         ctx.fillText(currentTime, coverX, textOffsetY + 220);
         ctx.fillText(info.duracion, coverX + coverSize - 220, textOffsetY + 220);
 
-        const imagePath = path.join(IMAGE_FOLDER, `applemusic_${Date.now()}.png`);
-        const out = fs.createWriteStream(imagePath);
-        const stream = canvas.createPNGStream();
-        stream.pipe(out);
-        out.on("finish", () => {
-            res.json({
-                success: true,
-                titulo: info.titulo,
-                artista: info.artista,
-                album: info.album,
-                duracion: info.duracion,
-                imageUrl: `/images/${path.basename(imagePath)}`
-            });
+        // Enviar imagen directamente como base64 (sin guardar en disco)
+        const imageBuffer = canvas.toBuffer("image/png");
+        const base64Image = imageBuffer.toString("base64");
+
+        res.json({
+            success: true,
+            titulo: info.titulo,
+            artista: info.artista,
+            album: info.album,
+            duracion: info.duracion,
+            imagen: `data:image/png;base64,${base64Image}`
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-
 app.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
+       
