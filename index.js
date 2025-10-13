@@ -8,8 +8,8 @@ const { createCanvas, loadImage, registerFont } = require("canvas");
 const app = express();
 const PORT = 3333;
 
-registerFont(path.join(__dirname, "../fonts/SF-Pro.ttf"), { family: "SFProDisplay" });
-registerFont(path.join(__dirname, "../fonts/monospace.ttf"), { family: "SFProText" });
+registerFont(path.join(__dirname, "./fonts/SF-Pro.ttf"), { family: "SFProDisplay" });
+registerFont(path.join(__dirname, "./fonts/monospace.ttf"), { family: "SFProText" });
 
 const IMAGE_FOLDER = path.join(__dirname, "public", "images");
 if (!fs.existsSync(IMAGE_FOLDER)) {
