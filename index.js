@@ -7,11 +7,13 @@ const { createCanvas, loadImage, registerFont } = require("canvas");
 const app = express();
 const PORT = 3333;
 
+// Registrar fuentes
 registerFont(path.join(__dirname, "./fonts/SF-Pro.ttf"), { family: "SFProDisplay" });
-registerFont(path.join(__dirname, "./fonts/monospace.ttf"), { family: "SFProText" });
+registerFont(path.join(__dirname, "./fonts/SF-Pro.ttf"), { family: "SFProText" }); // Usa la misma fuente, coherente
 
 app.use(express.json());
 
+// Función auxiliar para solicitudes HTTPS
 function httpsGet(url) {
     return new Promise((resolve, reject) => {
         https.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
@@ -22,6 +24,7 @@ function httpsGet(url) {
     });
 }
 
+// Convertir formato ISO8601 a minutos:segundos
 function formatDuration(duration) {
     if (!duration) return null;
     const match = duration.match(/PT(\d+M)?(\d+S)?/);
@@ -37,6 +40,7 @@ app.post("/api/applemusic", async (req, res) => {
         const { url } = req.body;
         if (!url) return res.status(400).json({ error: "Falta el parámetro 'url'" });
 
+        // Obtener HTML de Apple Music
         const html = await httpsGet(url);
         const $ = cheerio.load(html);
         const jsonText = $('script#schema\\:song').html();
@@ -56,7 +60,7 @@ app.post("/api/applemusic", async (req, res) => {
             duracion: formatDuration(audio.duration || json.timeRequired) || "0:00",
         };
 
-        // Cargar imágenes
+        // Cargar imágenes desde la red
         const baseUrl = "https://raw.githubusercontent.com/IrokzDal/uploads/main/1758134360746.jpeg";
         const loadBuffer = (url) => new Promise((resolve, reject) => {
             https.get(url, (r) => {
@@ -85,8 +89,10 @@ app.post("/api/applemusic", async (req, res) => {
         const radius = 60;
         const currentTime = `0:${Math.floor(Math.random() * 8) + 3}`;
 
-        // Dibujo
+        // Dibujo general
         ctx.drawImage(base, 0, 0, width, height);
+
+        // Marco redondeado de carátula
         ctx.save();
         ctx.beginPath();
         ctx.moveTo(coverX + radius, coverY);
@@ -103,21 +109,24 @@ app.post("/api/applemusic", async (req, res) => {
         ctx.drawImage(cover, coverX, coverY, coverSize, coverSize);
         ctx.restore();
 
+        // Texto: título
         ctx.fillStyle = "#fff";
         ctx.font = "bold 90px SFProDisplay";
         ctx.fillText(info.titulo, coverX, textOffsetY);
 
+        // Texto: artista
         ctx.globalAlpha = fadeArtist;
         ctx.font = "70px SFProDisplay";
         ctx.fillText(info.artista, coverX, textOffsetY + 100);
         ctx.globalAlpha = 1;
 
+        // Tiempo actual y duración (usando SF Pro)
         ctx.fillStyle = "rgba(255,255,255,0.9)";
-        ctx.font = "60px SFProText";
+        ctx.font = "60px SFProDisplay";
         ctx.fillText(currentTime, coverX, textOffsetY + 220);
         ctx.fillText(info.duracion, coverX + coverSize - 220, textOffsetY + 220);
 
-        // Enviar imagen directamente como base64 (sin guardar en disco)
+        // Convertir canvas a base64
         const imageBuffer = canvas.toBuffer("image/png");
         const base64Image = imageBuffer.toString("base64");
 
@@ -137,4 +146,5 @@ app.post("/api/applemusic", async (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
-       
+
+        
