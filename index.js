@@ -1,196 +1,149 @@
- const express = require("express");
+const express = require("express");
 const path = require("path");
 const fs = require("fs");
-const { createCanvas } = require("canvas");
+const https = require("https");
+const cheerio = require("cheerio");
+const { createCanvas, loadImage, registerFont } = require("canvas");
+
 const app = express();
 const PORT = 3333;
 
-// Carpeta para guardar las imágenes generadas
+registerFont(path.join(__dirname, "../fonts/SF-Pro.ttf"), { family: "SFProDisplay" });
+registerFont(path.join(__dirname, "../fonts/monospace.ttf"), { family: "SFProText" });
+
 const IMAGE_FOLDER = path.join(__dirname, "public", "images");
 if (!fs.existsSync(IMAGE_FOLDER)) {
     fs.mkdirSync(IMAGE_FOLDER, { recursive: true });
 }
 
 app.use(express.static(path.join(__dirname, "public")));
-
-// Asegúrate de que el servidor pueda manejar JSON en el cuerpo de las solicitudes POST
 app.use(express.json());
 
-async function ytdls(query, desiredQuality) {
-    const searchUrl = "https://ssvid.net/api/ajax/search";
-    const convertUrl = "https://ssvid.net/api/ajax/convert";
-    const searchBody = `query=${encodeURIComponent(query)}&vt=home`;
-
-    try {
-        const searchResponse = await fetch(searchUrl, {
-            method: "POST",
-            headers: {
-                "accept": "*/*",
-                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-            },
-            body: searchBody
-        });
-        const searchData = await searchResponse.json();
-        const vid = searchData.vid;
-        const title = searchData.title;
-
-        const qualityMap = {
-            "360p": "134",
-            "720p": "136",
-            "1080p": "137",
-            "128kbps": "mp3128"
-        };
-
-        const qualityKey = qualityMap[desiredQuality];
-
-        const links = {
-            mp4: JSON.stringify(searchData.links.mp4),
-            mp3: JSON.stringify(searchData.links.mp3)
-        };
-
-        const parsedLinks = {
-            mp4: JSON.parse(links.mp4),
-            mp3: JSON.parse(links.mp3)
-        };
-
-        const videoQuality = parsedLinks.mp4[qualityKey] || parsedLinks.mp3[qualityKey];
-        const { k, size } = videoQuality;
-        const convertBody = `vid=${vid}&k=${encodeURIComponent(k)}`;
-
-        const convertResponse = await fetch(convertUrl, {
-            method: "POST",
-            headers: {
-                "accept": "*/*",
-                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-            },
-            body: convertBody
-        });
-
-        const conversionResult = await convertResponse.json();
-        const thumbnailUrl = `https://img.youtube.com/vi/${vid}/hqdefault.jpg`;
-        return {
-            creator: "@Samush$_",
-            data: {
-                title,
-                size,
-                vid,
-                thumbnail: thumbnailUrl,
-                dl_url: conversionResult.dlink
-            }
-        };
-    } catch (error) {
-        
-    }
+function httpsGet(url) {
+    return new Promise((resolve, reject) => {
+        https.get(url, { headers: { "User-Agent": "Mozilla/5.0" } }, (res) => {
+            let data = "";
+            res.on("data", (chunk) => (data += chunk));
+            res.on("end", () => resolve(data));
+        }).on("error", reject);
+    });
 }
 
-app.get('/starlight/youtube-mp3', async (req, res) => {
-  //  actualizarStats(req);
-    const url = req.query.url;
+function formatDuration(duration) {
+    if (!duration) return null;
+    const match = duration.match(/PT(\d+M)?(\d+S)?/);
+    if (!match) return duration;
 
-    if (!url) {
-        return res.status(400).json({ error: 'falta el parametro url' });
-    }
+    const min = match[1] ? parseInt(match[1]) : 0;
+    const sec = match[2] ? parseInt(match[2]) : 0;
+    return `${min}:${sec < 10 ? "0" : ""}${sec}`;
+}
 
+app.post("/api/applemusic", async (req, res) => {
     try {
-      const desiredQuality = "128kbps"; 
-        const result = await ytdls(url, desiredQuality);
-        res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.status(200).send(JSON.stringify(result, null, 4));
-    } catch (error) {
-        res.status(500).json({ error: '://' });
-    }
-});
+        const { url } = req.body;
+        if (!url) return res.status(400).json({ error: "Falta el parámetro 'url'" });
 
-app.get('/starlight/youtube-mp4', async (req, res) => {
-    const url = req.query.url;
-    const desiredQuality = req.query.q || ""; 
-    if (!url) {
-        return res.status(400).json({ error: 'falta parametro url' });
-    }
-    try {
-        const result = await ytdls(url, desiredQuality);
-        res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.status(200).send(JSON.stringify(result, null, 4));
-    } catch (error) {
-        res.status(500).json({ error: '://' });
-    }
-});
+        const html = await httpsGet(url);
+        const $ = cheerio.load(html);
+        const jsonText = $('script#schema\\:song').html();
+        if (!jsonText) throw new Error("No se encontró el script schema:song");
 
-app.post("/api/json", (req, res) => {
-    const text = req.body.text || "brat"; // Texto por defecto
+        const json = JSON.parse(jsonText);
+        const audio = json.audio?.audio || json.audio || {};
+        const artist = audio.byArtist?.[0] || json.audio?.byArtist?.[0] || {};
+        const albumArtist = audio.inAlbum?.byArtist?.[0] || {};
+        const albumTitle = $('h1[data-testid="non-editable-product-title"]').text().trim();
 
-    // Crear un canvas de menor resolución para el efecto pixelado
-    const smallCanvas = createCanvas(250, 250); // Canvas pequeño
-    const ctx = smallCanvas.getContext("2d");
+        const info = {
+            titulo: json.name || audio.name,
+            artista: artist.name || albumArtist.name || null,
+            album: albumTitle || null,
+            imagen: audio.image || json.image || null,
+            duracion: formatDuration(audio.duration || json.timeRequired) || "0:00",
+        };
 
-    // Limpiar el canvas y establecer el fondo blanco
-    ctx.clearRect(0, 0, smallCanvas.width, smallCanvas.height);
-    ctx.fillStyle = "#FFFFFF"; // Fondo blanco
-    ctx.fillRect(0, 0, smallCanvas.width, smallCanvas.height);
-
-    // Establecer color y fuente con mayor tamaño de letra
-    ctx.fillStyle = "black";
-    ctx.font = "24px Arial Narrow"; // Fuente de texto más grande
-
-    // Función para dividir el texto en líneas
-    const wrapText = (context, text, maxWidth) => {
-        const words = text.split(" ");
-        let lines = [];
-        let currentLine = words[0];
-
-        for (let i = 1; i < words.length; i++) {
-            const word = words[i];
-            const width = context.measureText(currentLine + " " + word).width;
-            if (width < maxWidth) {
-                currentLine += " " + word;
-            } else {
-                lines.push(currentLine);
-                currentLine = word;
-            }
-        }
-        lines.push(currentLine);
-        return lines;
-    };
-
-    // Dividir el texto automáticamente
-    const maxLineWidth = 200; // Ancho máximo para cada línea
-    const textArray = wrapText(ctx, text, maxLineWidth);
-
-    // Posicionar el texto en el canvas pequeño
-    const lineHeight = 30; // Altura de cada línea más grande
-    const totalTextHeight = textArray.length * lineHeight;
-    const startY = (smallCanvas.height - totalTextHeight) / 2; // Centrado verticalmente
-
-    textArray.forEach((lineText, index) => {
-        const textWidth = ctx.measureText(lineText).width;
-        const startX = (smallCanvas.width - textWidth) / 2; // Centrado horizontalmente
-        ctx.fillText(lineText, startX, startY + lineHeight * index);
-    });
-
-    // Crear un canvas más grande para escalar y pixelar
-    const largeCanvas = createCanvas(500, 500);
-    const largeCtx = largeCanvas.getContext("2d");
-
-    // Escalar el canvas pequeño al tamaño grande para el efecto pixelado
-    largeCtx.drawImage(smallCanvas, 0, 0, largeCanvas.width, largeCanvas.height);
-
-    // Guardar la imagen en el servidor
-    const imagePath = path.join(IMAGE_FOLDER, `image_${Date.now()}.png`);
-    const out = fs.createWriteStream(imagePath);
-    const stream = largeCanvas.createPNGStream();
-    stream.pipe(out);
-
-    out.on("finish", () => {
-        res.json({
-            success: true,
-            imageUrl: `/images/${path.basename(imagePath)}`
+        const baseUrl = "https://raw.githubusercontent.com/IrokzDal/uploads/main/1758134360746.jpeg";
+        const baseBuffer = await new Promise((resolve, reject) => {
+            https.get(baseUrl, (r) => {
+                const chunks = [];
+                r.on("data", (c) => chunks.push(c));
+                r.on("end", () => resolve(Buffer.concat(chunks)));
+            }).on("error", reject);
         });
-    });
+
+        const coverBuffer = await new Promise((resolve, reject) => {
+            https.get(info.imagen, (r) => {
+                const chunks = [];
+                r.on("data", (c) => chunks.push(c));
+                r.on("end", () => resolve(Buffer.concat(chunks)));
+            }).on("error", reject);
+        });
+
+        const base = await loadImage(baseBuffer);
+        const cover = await loadImage(coverBuffer);
+        const width = base.width;
+        const height = base.height;
+        const canvas = createCanvas(width, height);
+        const ctx = canvas.getContext("2d");
+
+        const coverX = 300;
+        const coverY = 580;
+        const coverSize = 1600;
+        const textOffsetY = 2490;
+        const fadeArtist = 0.7;
+        const radius = 60;
+        const currentTime = `0:${Math.floor(Math.random() * 8) + 3}`;
+        ctx.drawImage(base, 0, 0, width, height);
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(coverX + radius, coverY);
+        ctx.lineTo(coverX + coverSize - radius, coverY);
+        ctx.quadraticCurveTo(coverX + coverSize, coverY, coverX + coverSize, coverY + radius);
+        ctx.lineTo(coverX + coverSize, coverY + coverSize - radius);
+        ctx.quadraticCurveTo(coverX + coverSize, coverY + coverSize, coverX + coverSize - radius, coverY + coverSize);
+        ctx.lineTo(coverX + radius, coverY + coverSize);
+        ctx.quadraticCurveTo(coverX, coverY + coverSize, coverX, coverY + coverSize - radius);
+        ctx.lineTo(coverX, coverY + radius);
+        ctx.quadraticCurveTo(coverX, coverY, coverX + radius, coverY);
+        ctx.closePath();
+        ctx.clip();
+        ctx.drawImage(cover, coverX, coverY, coverSize, coverSize);
+        ctx.restore();
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 90px SFProDisplay";
+        ctx.fillText(info.titulo, coverX, textOffsetY);
+
+        ctx.globalAlpha = fadeArtist;
+        ctx.font = "70px SFProDisplay";
+        ctx.fillText(info.artista, coverX, textOffsetY + 100);
+        ctx.globalAlpha = 1;
+
+        ctx.fillStyle = "rgba(255,255,255,0.9)";
+        ctx.font = "60px SFProText";
+        ctx.fillText(currentTime, coverX, textOffsetY + 220);
+        ctx.fillText(info.duracion, coverX + coverSize - 220, textOffsetY + 220);
+
+        const imagePath = path.join(IMAGE_FOLDER, `applemusic_${Date.now()}.png`);
+        const out = fs.createWriteStream(imagePath);
+        const stream = canvas.createPNGStream();
+        stream.pipe(out);
+        out.on("finish", () => {
+            res.json({
+                success: true,
+                titulo: info.titulo,
+                artista: info.artista,
+                album: info.album,
+                duracion: info.duracion,
+                imageUrl: `/images/${path.basename(imagePath)}`
+            });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
+
 
 app.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
-       
