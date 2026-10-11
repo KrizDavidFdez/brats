@@ -1,4 +1,216 @@
-const express = require("express");
+const express = require('express');
+
+/* =========================================================
+ *  CLIENTE CNVMP3
+ * =======================================================*/
+class CNVMP3 {
+  constructor(opts = {}) {
+    this.baseUrl     = opts.baseUrl     ?? 'https://cnvmp3.com';
+    this.downloadUrl = opts.downloadUrl ?? 'https://apio11dlp.cnvmp3.site';
+    this.referer     = opts.referer     ?? `${this.baseUrl}/v55`;
+    this.userAgent   = opts.userAgent   ??
+      'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Mobile Safari/537.36';
+    this.timeout     = opts.timeout ?? 30000;
+    this.token       = opts.token   ?? '1234';
+  }
+
+  _headers(extra = {}) {
+    return {
+      'accept':             '*/*',
+      'accept-language':    'es-PE,es-419;q=0.9,es;q=0.8',
+      'content-type':       'application/json',
+      'origin':             this.baseUrl,
+      'referer':            this.referer,
+      'user-agent':         this.userAgent,
+      'sec-ch-ua':          '"Not A(Brand";v="8", "Chromium";v="132"',
+      'sec-ch-ua-mobile':   '?1',
+      'sec-ch-ua-platform': '"Android"',
+      'sec-fetch-dest':     'empty',
+      'sec-fetch-mode':     'cors',
+      'sec-fetch-site':     'same-origin',
+      ...extra,
+    };
+  }
+
+  async _post(endpoint, body) {
+    const ctrl = new AbortController();
+    const t    = setTimeout(() => ctrl.abort(), this.timeout);
+    try {
+      const res = await fetch(`${this.baseUrl}/${endpoint}`, {
+        method:  'POST',
+        headers: this._headers(),
+        body:    JSON.stringify(body),
+        signal:  ctrl.signal,
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = text; }
+
+      if (!res.ok) {
+        const err = new Error(`HTTP ${res.status} en ${endpoint}`);
+        err.status = res.status;
+        err.body   = data;
+        throw err;
+      }
+      return data;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  async checkDatabase(youtubeId, quality = 4, formatValue = 1) {
+    if (!youtubeId) throw new Error('youtubeId es requerido');
+    return this._post('check_database.php', {
+      youtube_id:  youtubeId,
+      quality,
+      formatValue,
+    });
+  }
+
+  async getVideoData(youtubeUrl, token = this.token) {
+    if (!youtubeUrl) throw new Error('youtubeUrl es requerido');
+    return this._post('get_video_data.php', {
+      url:   youtubeUrl,
+      token,
+    });
+  }
+
+  async downloadVideoUcep({ url, quality = 4, title, formatValue = 1 }) {
+    if (!url)   throw new Error('url es requerido');
+    if (!title) throw new Error('title es requerido');
+    return this._post('download_video_ucep.php', {
+      url,
+      quality,
+      title,
+      formatValue,
+    });
+  }
+
+  async insertToDatabase({ youtubeId, serverPath, quality = 4, title, formatValue = 1 }) {
+    if (!youtubeId)  throw new Error('youtubeId es requerido');
+    if (!serverPath) throw new Error('serverPath es requerido');
+    if (!title)      throw new Error('title es requerido');
+    return this._post('insert_to_database.php', {
+      youtube_id:  youtubeId,
+      server_path: serverPath,
+      quality,
+      title,
+      formatValue,
+    });
+  }
+
+  async smartDownload(youtubeId, { quality = 4, formatValue = 1 } = {}) {
+    if (!youtubeId) throw new Error('youtubeId es requerido');
+
+    const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeId}`;
+
+    // 1) ¿Ya existe en la DB?
+    const check = await this.checkDatabase(youtubeId, quality, formatValue);
+    const raw   = { check };
+
+    if (check?.success && check?.data?.server_path) {
+      return {
+        source:       'db',
+        alreadyInDb:  true,
+        title:        check.data.title,
+        downloadLink: check.data.server_path,
+        raw,
+      };
+    }
+
+    // 2) Obtener datos del video
+    const data = await this.getVideoData(youtubeUrl);
+    raw.data = data;
+    if (!data?.success || !data?.title) {
+      throw new Error(`get_video_data falló: ${JSON.stringify(data)}`);
+    }
+    const title = data.title;
+
+    // 3) Convertir
+    const conv = await this.downloadVideoUcep({
+      url: youtubeUrl,
+      quality,
+      title,
+      formatValue,
+    });
+    raw.convert = conv;
+
+    if (!conv?.download_link) {
+      throw new Error(`download_video_ucep falló: ${JSON.stringify(conv)}`);
+    }
+
+    // 4) Insertar en DB
+    let insertResult;
+    try {
+      insertResult = await this.insertToDatabase({
+        youtubeId,
+        serverPath: conv.download_link,
+        quality,
+        title,
+        formatValue,
+      });
+    } catch (e) {
+      insertResult = { success: false, error: e.message };
+    }
+    raw.insert = insertResult;
+
+    return {
+      source:       'fresh',
+      alreadyInDb:  insertResult?.success === false &&
+                    /duplicate/i.test(insertResult?.error || ''),
+      title,
+      downloadLink: conv.download_link,
+      raw,
+    };
+  }
+}
+
+/* =========================================================
+ *  SERVIDOR EXPRESS
+ * =======================================================*/
+const app  = express();
+const PORT = 3333;
+
+app.use(express.json());
+
+const client = new CNVMP3({
+  baseUrl:     process.env.CNVMP3_BASE_URL     || 'https://cnvmp3.com',
+  downloadUrl: process.env.CNVMP3_DOWNLOAD_URL || 'https://apio11dlp.cnvmp3.site',
+  token:       process.env.CNVMP3_TOKEN        || '1234',
+  timeout:     Number(process.env.CNVMP3_TIMEOUT || 30000),
+});
+
+/* =========================================================
+ *  ÚNICO ENDPOINT:  GET /:youtubeId
+ * =======================================================*/
+app.get('/:youtubeId', async (req, res) => {
+  try {
+    const { youtubeId } = req.params;
+    const quality       = Number(req.query.quality     ?? 4);
+    const formatValue   = Number(req.query.formatValue ?? 1);
+
+    const info = await client.smartDownload(youtubeId, { quality, formatValue });
+
+    res.json({
+      ok:          true,
+      youtubeId,
+      source:      info.source,       // 'db' | 'fresh'
+      alreadyInDb: info.alreadyInDb,
+      title:       info.title,
+      url:         info.downloadLink,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+/* =========================================================
+ *  START
+ * =======================================================*/
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 CNVMP3 URL API escuchando en http://0.0.0.0:${PORT}`);
+});
+/*const express = require("express");
 const path = require("path");
 const https = require("https");
 const cheerio = require("cheerio");
@@ -153,4 +365,4 @@ app.post("/api/applemusic", async (req, res) => {
 app.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
-                
+                */
