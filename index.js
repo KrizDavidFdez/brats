@@ -1,12 +1,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
-//  YT Music Downloader – un solo archivo
-//  Requisitos:   npm i express youtubei.js          (youtubei.js es opcional pero recomendado)
-//  Recomendado:  pkg install yt-dlp   (o: pip install -U yt-dlp)
+//  YT Music Downloader – un solo archivo (sin yt-dlp)
+//  Requisitos:   npm i express youtubei.js
 //  Ejecutar:     node server.js   →   http://localhost:3000
 // ─────────────────────────────────────────────────────────────────────────────
 const dns = require('node:dns');
 const net = require('node:net');
-const { spawn } = require('node:child_process');
 const { existsSync, readFileSync } = require('node:fs');
 const express = require('express');
 
@@ -26,21 +24,6 @@ const UA_VISION = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/60
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /* ───────────────────────── Utilidades ───────────────────────── */
-
-function run(cmd, args, timeout = 45000) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args);
-    let out = '', err = '';
-    const t = setTimeout(() => { p.kill('SIGKILL'); reject(new Error('timeout')); }, timeout);
-    p.stdout.on('data', d => (out += d));
-    p.stderr.on('data', d => (err += d));
-    p.on('error', e => { clearTimeout(t); reject(e); });
-    p.on('close', code => {
-      clearTimeout(t);
-      code === 0 ? resolve(out) : reject(new Error(err.trim().split('\n').pop() || `exit ${code}`));
-    });
-  });
-}
 
 function parseCookies(input = null) {
   if (input && typeof input === 'string' && input.includes('=')) return input.trim();
@@ -119,28 +102,6 @@ async function searchMusic(q) {
   return (sec[0]?.musicShelfRenderer?.contents || []).map(parseItem).filter(Boolean);
 }
 
-/* ───────────────────────── Búsqueda de respaldo ───────────────────────── */
-
-let ytdlpBin = undefined; // undefined = sin probar, null = no existe
-async function getYtdlp() {
-  if (ytdlpBin !== undefined) return ytdlpBin;
-  for (const c of [['yt-dlp'], ['python3', '-m', 'yt_dlp'], ['python', '-m', 'yt_dlp']]) {
-    try { await run(c[0], [...c.slice(1), '--version'], 15000); return (ytdlpBin = c); } catch {}
-  }
-  return (ytdlpBin = null);
-}
-
-async function searchYtdlp(q) {
-  const bin = await getYtdlp();
-  if (!bin) throw new Error('yt-dlp no instalado');
-  const out = await run(bin[0], [...bin.slice(1), `ytsearch10:${q}`, '--flat-playlist', '--dump-json', '--no-warnings'], 40000);
-  return out.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean).map(j => ({
-    videoId: j.id, title: j.title, artists: [{ name: j.uploader || j.channel || '' }],
-    duration: j.duration ? `${Math.floor(j.duration / 60)}:${String(Math.floor(j.duration % 60)).padStart(2, '0')}` : null,
-    thumbnail: `https://i.ytimg.com/vi/${j.id}/mqdefault.jpg`
-  }));
-}
-
 /* ───────────────────────── Resolvers de stream ─────────────────────────
    Cada resolver devuelve { url, headers, size, ext, mimeType, title, author }.
    Toda URL se VALIDA con una petición real antes de aceptarla (evita el 403). */
@@ -199,37 +160,7 @@ async function resolveRaw(id, name) {
   };
 }
 
-// 2) yt-dlp (el más robusto: mantiene al día firmas, n-challenge y clientes)
-async function resolveYtdlp(id) {
-  const bin = await getYtdlp();
-  if (!bin) throw new Error('yt-dlp no instalado (pkg install yt-dlp)');
-  const fmt = ['-f', '140/bestaudio[ext=m4a]/bestaudio', '--dump-single-json', '--no-playlist', '--no-warnings'];
-  const ck = cookiesFile() ? ['--cookies', cookiesFile()] : [];
-  const variants = [
-    ['--js-runtimes', 'node', '--extractor-args', 'youtube:player_client=android_vr,ios,tv'],
-    ['--js-runtimes', 'node'],
-    ['--extractor-args', 'youtube:player_client=android_vr,ios,tv'],
-    []
-  ];
-  let lastErr;
-  for (const v of variants) {
-    try {
-      const out = await run(bin[0], [...bin.slice(1), ...fmt, ...ck, ...v, `https://www.youtube.com/watch?v=${id}`], 60000);
-      const j = JSON.parse(out);
-      const url = j.url || j.requested_formats?.[0]?.url;
-      if (!url) throw new Error('yt-dlp no devolvió URL');
-      return {
-        url, headers: std({ ...(j.http_headers || { 'User-Agent': CHROME_UA }) }),
-        size: j.filesize || j.filesize_approx || 0,
-        ext: j.ext === 'webm' ? 'webm' : j.ext || 'm4a', mimeType: j.ext === 'webm' ? 'audio/webm' : 'audio/mp4',
-        title: j.title, author: (j.artist || j.uploader || j.channel || '').replace(/\s*-\s*Topic$/i, '')
-      };
-    } catch (e) { lastErr = e; }
-  }
-  throw lastErr;
-}
-
-// 3) youtubei.js (descifra firmas/"n" por sí mismo)
+// 2) youtubei.js (descifra firmas/"n" por sí mismo)
 let ytPromise = null;
 const getYT = () => (ytPromise ||= import('youtubei.js').then(m => m.Innertube.create({ retrieve_player: true })).catch(e => { ytPromise = null; throw new Error('youtubei.js no instalado (npm i youtubei.js): ' + e.message); }));
 const YT_UA = { ANDROID_VR: UA_VR, IOS: UA_IOS, ANDROID: 'com.google.android.youtube/19.44.38 (Linux; U; Android 14) gzip' };
@@ -252,7 +183,6 @@ const RESOLVERS = [
   ['raw:ANDROID_VR', id => resolveRaw(id, 'ANDROID_VR')],
   ['raw:VISIONOS', id => resolveRaw(id, 'VISIONOS')],
   ['raw:IOS', id => resolveRaw(id, 'IOS')],
-  ['yt-dlp', resolveYtdlp],
   ['youtubei.js:ANDROID_VR', id => resolveYtjs(id, 'ANDROID_VR')],
   ['youtubei.js:IOS', id => resolveYtjs(id, 'IOS')],
   ['youtubei.js:ANDROID', id => resolveYtjs(id, 'ANDROID')],
@@ -349,40 +279,21 @@ async function streamSingle(src, res) {
   res.end();
 }
 
-// Último recurso: yt-dlp escribe el audio directo a stdout y se lo pasamos al cliente
-async function streamYtdlpPipe(id, res) {
-  const bin = await getYtdlp();
-  if (!bin) throw new Error('yt-dlp no instalado');
-  res.removeHeader('Content-Length');
-  const ck = cookiesFile() ? ['--cookies', cookiesFile()] : [];
-  await new Promise((resolve, reject) => {
-    const p = spawn(bin[0], [...bin.slice(1), '-f', '140/bestaudio[ext=m4a]/bestaudio', '--no-playlist', '--no-warnings',
-      '--js-runtimes', 'node', ...ck, '-o', '-', `https://www.youtube.com/watch?v=${id}`]);
-    let wrote = false, err = '';
-    p.stdout.on('data', d => { wrote = true; res.write(d); });
-    p.stderr.on('data', d => (err += d));
-    p.on('error', reject);
-    p.on('close', c => (c === 0 && wrote ? (res.end(), resolve()) : reject(new Error(err.trim().split('\n').pop() || 'yt-dlp pipe falló'))));
-    res.on('close', () => p.kill());
-  });
-}
-
 /* ───────────────────────── Express ───────────────────────── */
 
 const app = express();
 app.get('/', (_req, res) => res.type('html').send(HTML));
 
 app.get('/api/status', async (_req, res) => {
-  const bin = await getYtdlp();
   let ytjs = true; try { await import('youtubei.js'); } catch { ytjs = false; }
-  res.json({ node: process.version, ytdlp: !!bin, youtubeiJs: ytjs, cookies: !!cookiesFile() });
+  res.json({ node: process.version, youtubeiJs: ytjs, cookies: !!cookiesFile() });
 });
 
 app.get('/api/search', async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Consulta vacía' });
-  try { const r = await searchMusic(q); if (r.length) return res.json(r); } catch (e) { console.log('search innertube falló:', e.message); }
-  try { return res.json(await searchYtdlp(q)); } catch (e) { return res.status(502).json({ error: 'Búsqueda falló: ' + e.message }); }
+  try { return res.json(await searchMusic(q)); }
+  catch (e) { return res.status(502).json({ error: 'Búsqueda falló: ' + e.message }); }
 });
 
 app.get('/api/resolve', async (req, res) => {
@@ -394,7 +305,7 @@ app.get('/api/resolve', async (req, res) => {
   } catch (e) {
     res.status(502).json({
       error: e.message, attempts: e.attempts,
-      hint: 'Instala yt-dlp (pkg install yt-dlp  ó  pip install -U yt-dlp) y youtubei.js (npm i youtubei.js), y actualiza: pip install -U yt-dlp'
+      hint: 'Instala youtubei.js (npm i youtubei.js) y actualízalo regularmente: npm i youtubei.js@latest'
     });
   }
 });
@@ -415,7 +326,6 @@ app.get('/api/download', async (req, res) => {
   const steps = [];
   if (src.size) steps.push(['chunks x' + chunks, () => streamChunked(src, chunks, res)]);
   steps.push(['stream único', () => streamSingle(src, res)]);
-  steps.push(['yt-dlp pipe', () => streamYtdlpPipe(id, res)]);
 
   for (const [name, fn] of steps) {
     try {
@@ -424,7 +334,7 @@ app.get('/api/download', async (req, res) => {
       return;
     } catch (e) {
       console.log(`✖ ${name}: ${e.message}`);
-      if (res.headersSent) return res.destroy(); // ya se enviaron bytes: no se puede cambiar de método
+      if (res.headersSent) return res.destroy();
       cache.delete(id);
     }
   }
@@ -434,10 +344,9 @@ app.get('/api/download', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
-  const bin = await getYtdlp();
   let ytjs = true; try { await import('youtubei.js'); } catch { ytjs = false; }
   console.log(`http://localhost:${PORT}`);
-  console.log(`yt-dlp: ${bin ? 'OK' : 'NO (recomendado: pkg install yt-dlp)'} | youtubei.js: ${ytjs ? 'OK' : 'NO (npm i youtubei.js)'}`);
+  console.log(`youtubei.js: ${ytjs ? 'OK' : 'NO (npm i youtubei.js)'}`);
 });
 
 /* ───────────────────────── HTML ───────────────────────── */
@@ -537,7 +446,6 @@ module.exports = {
   streamChunked,
   app
 };
-
 /* ───────────────────────── Exports (CommonJS) ───────────────────────── */
 
 /*module.exports = {
