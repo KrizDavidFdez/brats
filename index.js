@@ -1,15 +1,22 @@
 // ─────────────────────────────────────────────────────────────────────────────
-//  YT Music Downloader – un solo archivo (sin yt-dlp)
-//  Requisitos:   npm i express youtubei.js
-//  Ejecutar:     node server.js   →   http://localhost:3000
+//  YT Music Downloader – un solo archivo (sin yt-dlp, sin ffmpeg)
+//
+//  Instalar:   npm i express youtubei.js@latest bgutils-js jsdom undici
+//  Ejecutar:   node server.js            → http://localhost:3000
+//
+//  Variables / archivos opcionales (todo suma contra el "Sign in to confirm you're not a bot"):
+//    ytmusic.txt      cookies Netscape de una sesión logueada (junto a este archivo)
+//    proxies.txt      un proxy HTTP/HTTPS por línea:  http://user:pass@host:puerto
+//    PROXIES=...      lo mismo, separado por comas
+//    AUTO_PROXY=1     si todo falla, busca proxies gratis y los prueba (poco fiable)
+//    YT_LOGIN=1       login OAuth (código en pantalla → google.com/device). Se guarda en yt-oauth.json
 // ─────────────────────────────────────────────────────────────────────────────
 const dns = require('node:dns');
 const net = require('node:net');
-const { existsSync, readFileSync } = require('node:fs');
+const { existsSync, readFileSync, writeFileSync } = require('node:fs');
 const express = require('express');
 
-// La URL de googlevideo queda atada a la IP con que se pidió: si Node alterna
-// IPv4/IPv6 entre "resolver" y "descargar" → 403. Forzamos IPv4 siempre.
+// La URL de googlevideo queda atada a la IP con que se pidió: forzamos IPv4 siempre.
 dns.setDefaultResultOrder('ipv4first');
 try { net.setDefaultAutoSelectFamily(false); } catch {}
 
@@ -20,13 +27,26 @@ const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 const UA_VR = 'com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip';
 const UA_IOS = 'com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)';
 const UA_VISION = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15';
+const UA_ANDROID = 'com.google.android.youtube/19.44.38 (Linux; U; Android 14) gzip';
+const UA_TV = 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version';
+const CLIENT_UA = { ANDROID_VR: UA_VR, IOS: UA_IOS, VISIONOS: UA_VISION, ANDROID: UA_ANDROID, TV: UA_TV, TV_SIMPLY: UA_TV };
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout ${ms / 1000}s`)), ms))]);
+const shuffle = (a) => a.map(v => [Math.random(), v]).sort((x, y) => x[0] - y[0]).map(x => x[1]);
+const std = (h) => ({ Accept: '*/*', 'Accept-Language': 'en-US,en;q=0.9', ...h });
+const readJson = (f) => { try { return JSON.parse(readFileSync(f, 'utf8')); } catch { return null; } };
 
-/* ───────────────────────── Utilidades ───────────────────────── */
+async function getJson(url, ms = 8000) {
+  const r = await fetch(url, { signal: AbortSignal.timeout(ms), headers: { 'User-Agent': CHROME_UA } });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
 
-function parseCookies(input = null) {
-  if (input && typeof input === 'string' && input.includes('=')) return input.trim();
+/* ───────────────────────── Cookies ───────────────────────── */
+
+function parseCookies() {
+  if (process.env.YT_COOKIE) return process.env.YT_COOKIE.trim();
   for (const f of ['ytmusic.txt', 'ytcook.txt']) {
     if (!existsSync(f)) continue;
     try {
@@ -41,7 +61,6 @@ function parseCookies(input = null) {
   }
   return '';
 }
-const cookiesFile = () => ['ytmusic.txt', 'ytcook.txt'].find(existsSync);
 
 function extractVideoId(input) {
   if (!input) return null;
@@ -51,7 +70,60 @@ function extractVideoId(input) {
   return /^[a-zA-Z0-9_-]{11}$/.test(s) ? s : null;
 }
 
-/* ───────────────────────── Innertube (búsqueda) ───────────────────────── */
+/* ───────────────────────── Capa de red (directo / proxies) ─────────────────────────
+   La URL de stream queda atada a la IP de salida: si se resolvió por un proxy,
+   se descarga por ESE mismo proxy (src.net). */
+
+let undiciMod = null;
+const nets = new Map();
+const DIRECT = { name: 'directo', proxy: null, fetch: (u, o) => fetch(u, o) };
+
+async function makeNet(proxy) {
+  if (!proxy) return DIRECT;
+  if (nets.has(proxy)) return nets.get(proxy);
+  undiciMod ||= await import('undici').catch(() => { throw new Error('falta undici para proxies: npm i undici'); });
+  const dispatcher = new undiciMod.ProxyAgent(proxy);
+  const pf = async (input, init = {}) => {
+    let url = input, opts = { ...init };
+    if (typeof input !== 'string' && !(input instanceof URL)) { // Request → opciones planas
+      url = input.url;
+      opts = { method: input.method, headers: input.headers, body: ['GET', 'HEAD'].includes(input.method) ? undefined : await input.arrayBuffer(), ...init };
+    }
+    return undiciMod.fetch(url, { ...opts, dispatcher });
+  };
+  let host = proxy; try { host = new URL(proxy).host; } catch {}
+  const n = { name: 'proxy ' + host, proxy, fetch: pf };
+  nets.set(proxy, n);
+  return n;
+}
+
+const staticProxies = () => [
+  ...(process.env.PROXIES || '').split(','),
+  ...(existsSync('proxies.txt') ? readFileSync('proxies.txt', 'utf8').split('\n') : [])
+].map(s => s.trim()).filter(s => s && !s.startsWith('#')).map(s => (/^\w+:\/\//.test(s) ? s : 'http://' + s));
+
+let freeProxies = [], discovering = null;
+function discoverFreeProxies() {
+  return (discovering ||= (async () => {
+    try {
+      const txt = await (await fetch('https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt', { signal: AbortSignal.timeout(10000) })).text();
+      const list = shuffle(txt.split('\n').map(s => s.trim()).filter(Boolean)).slice(0, 80);
+      const ok = [];
+      await Promise.all(list.map(async hp => {
+        try {
+          const n = await makeNet('http://' + hp);
+          const r = await n.fetch('https://www.youtube.com/generate_204', { signal: AbortSignal.timeout(7000) });
+          r.body?.cancel?.().catch?.(() => {});
+          if (r.status === 204 || r.ok) ok.push('http://' + hp);
+        } catch {}
+      }));
+      freeProxies = ok.slice(0, 8);
+      console.log(`proxies gratis útiles: ${freeProxies.length}`);
+    } catch (e) { console.log('AUTO_PROXY falló:', e.message); }
+  })());
+}
+
+/* ───────────────────────── Innertube crudo (búsqueda + clientes raw) ───────────────────────── */
 
 let ctxCache = null, ctxTime = 0;
 async function getInnertubeConfig() {
@@ -81,7 +153,6 @@ async function apiRequest(endpoint, payload) {
 }
 
 const flex = (ir, i) => ir?.flexColumns?.[i]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs || [];
-
 function parseItem(item) {
   const ir = item.musicResponsiveListItemRenderer;
   if (!ir) return null;
@@ -91,9 +162,9 @@ function parseItem(item) {
     || c0[0]?.navigationEndpoint?.watchEndpoint?.videoId;
   if (!videoId) return null;
   const artists = c1.filter(r => r.navigationEndpoint?.browseEndpoint?.browseId?.startsWith('UC')).map(r => ({ name: r.text }));
-  const dur = [...c1, ...c2].find(r => /^\d+:\d+$/.test(r.text))?.text
+  const duration = [...c1, ...c2].find(r => /^\d+:\d+$/.test(r.text))?.text
     || ir.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text?.runs?.[0]?.text || null;
-  return { videoId, title: c0[0]?.text || '', artists, duration: dur, thumbnail: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg` };
+  return { videoId, title: c0[0]?.text || '', artists, duration, thumbnail: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg` };
 }
 
 async function searchMusic(q) {
@@ -102,16 +173,125 @@ async function searchMusic(q) {
   return (sec[0]?.musicShelfRenderer?.contents || []).map(parseItem).filter(Boolean);
 }
 
-/* ───────────────────────── Resolvers de stream ─────────────────────────
-   Cada resolver devuelve { url, headers, size, ext, mimeType, title, author }.
-   Toda URL se VALIDA con una petición real antes de aceptarla (evita el 403). */
+async function searchYtjs(q) {
+  const yt = await getYT(DIRECT, 'anon');
+  const r = await yt.music.search(q, { type: 'song' });
+  const items = r.songs?.contents || r.contents?.flatMap(s => s.contents || []) || [];
+  return items.filter(i => i.id).map(i => ({
+    videoId: i.id, title: i.title, artists: (i.artists || []).map(a => ({ name: a.name })),
+    duration: i.duration?.text || null, thumbnail: `https://i.ytimg.com/vi/${i.id}/mqdefault.jpg`
+  }));
+}
+
+/* ───────────────────────── youtubei.js + evaluador JS + sesiones ─────────────────────────
+   OJO: youtubei.js ≥17 NO sabe descifrar URLs sin un evaluador JS propio.
+   Sin esta línea, los clientes web fallan ("Streaming data not available"). */
+
+let ytMod = null;
+async function loadYT() {
+  if (!ytMod) {
+    ytMod = await import('youtubei.js').catch(e => { throw new Error('youtubei.js no instalado (npm i youtubei.js@latest): ' + e.message); });
+    ytMod.Platform.shim.eval = async (data) => new Function(data.output)();
+  }
+  return ytMod;
+}
+
+// OAuth (login por código en pantalla)
+let oauthCreds = readJson('yt-oauth.json');
+const authState = { ok: false, pending: null, error: null };
+const sessions = new Map();
+
+async function startOauth() {
+  try {
+    const { Innertube, UniversalCache } = await loadYT();
+    const yt = await Innertube.create({ cache: new UniversalCache(false), retrieve_player: true });
+    const save = ({ credentials }) => { if (credentials) { oauthCreds = credentials; writeFileSync('yt-oauth.json', JSON.stringify(credentials)); } };
+    yt.session.on('auth-pending', d => {
+      authState.pending = { code: d.user_code, url: d.verification_url };
+      console.log(`\n🔑 LOGIN: abre ${d.verification_url} e ingresa el código ${d.user_code}\n`);
+    });
+    yt.session.on('auth', e => { save(e); authState.pending = null; authState.ok = true; authState.error = null; console.log('✔ OAuth listo'); });
+    yt.session.on('update-credentials', save);
+    yt.session.on('auth-error', e => { authState.error = e.message; });
+    sessions.set('directo|oauth', Promise.resolve(yt));
+    await yt.session.signIn(oauthCreds || undefined);
+    authState.ok = true; authState.pending = null;
+  } catch (e) { authState.error = e.message; sessions.delete('directo|oauth'); console.log('OAuth falló:', e.message); }
+}
+
+function getYT(netObj, auth) {
+  const key = `${netObj.name}|${auth}`;
+  if (sessions.has(key)) return sessions.get(key);
+  if (auth === 'oauth') return Promise.reject(new Error('sin login OAuth (arranca con YT_LOGIN=1)'));
+  const p = (async () => {
+    const { Innertube, UniversalCache } = await loadYT();
+    return Innertube.create({
+      retrieve_player: true,
+      cache: new UniversalCache(false),
+      ...(netObj.proxy ? { fetch: netObj.fetch } : {}),
+      ...(auth === 'cookie' ? { cookie: parseCookies() } : {})
+    });
+  })();
+  sessions.set(key, p);
+  p.catch(() => sessions.delete(key));
+  return p;
+}
+
+/* ───────────────────────── PO Token (BotGuard) ───────────────────────── */
+
+let minterP = null, minterAt = 0;
+const minterState = { ok: false, error: 'sin iniciar' };
+
+async function buildMinter() {
+  const [{ JSDOM }, { BotGuardClient }, { buildURL, parseLooseJSON, getHeaders, USER_AGENT }, { WebPoMinter }] = await Promise.all([
+    import('jsdom'), import('bgutils-js/botguard'), import('bgutils-js/utils'), import('bgutils-js/webpo')
+  ]);
+  const dom = new JSDOM('<!DOCTYPE html><html lang="en"><head><title></title></head><body></body></html>', {
+    url: 'https://www.youtube.com', referrer: 'https://www.youtube.com/', userAgent: USER_AGENT
+  });
+  const page = await fetch('https://www.youtube.com', { headers: { accept: '*/*', 'accept-language': 'en-US,en;q=0.7', 'user-agent': USER_AGENT } });
+  const html = await page.text();
+
+  const ytcfg = html.match(/ytcfg\.set\(({.+?})\);/s)?.[1];
+  if (!ytcfg) throw new Error('no se encontró ytcfg (IP bloqueada o página de consentimiento)');
+  dom.window.yt = { config_: JSON.parse(ytcfg) };
+  Object.assign(globalThis, { yt: dom.window.yt, window: dom.window, document: dom.window.document, location: dom.window.location, origin: dom.window.origin });
+  if (!('navigator' in globalThis)) Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator });
+
+  const att = html.match(/window\.ytAtN\(\s*({[\s\S]*?})\s*\)/);
+  if (!att) throw new Error('no se encontró el challenge en la página');
+  const challenge = parseLooseJSON(att[1]).R;
+  if (!challenge?.bgChallenge) throw new Error('challenge vacío');
+
+  const interpUrl = challenge.bgChallenge.interpreterUrl.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue;
+  const js = await (await fetch(`https:${interpUrl}`)).text();
+  if (!js) throw new Error('no se pudo cargar la VM de BotGuard');
+  new Function(js)();
+
+  const client = await BotGuardClient.create({ program: challenge.bgChallenge.program, globalName: challenge.bgChallenge.globalName, globalObject: globalThis });
+  const webPoSignalOutput = [];
+  const snapshot = await client.snapshot({ webPoSignalOutput });
+
+  const itRes = await fetch(buildURL('GenerateIT', true), { method: 'POST', headers: getHeaders(), body: JSON.stringify(['O43z0dpjhgX20SCx4KAo', snapshot]) });
+  const [integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken] = await itRes.json();
+  return WebPoMinter.create({ integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken }, webPoSignalOutput);
+}
+
+function getMinter() {
+  if (minterP && Date.now() - minterAt > 3 * 3600 * 1000) minterP = null; // renovar cada 3 h
+  return (minterP ||= buildMinter().then(m => { minterState.ok = true; minterState.error = null; minterAt = Date.now(); console.log('✔ PO token listo'); return m; })
+    .catch(e => { minterState.ok = false; minterState.error = e.message; console.log('✖ PO token:', e.message); minterP = null; return null; }));
+}
+
+/* ───────────────────────── Validación de URLs ───────────────────────── */
 
 const withRange = (url, a, b) => `${url}${url.includes('?') ? '&' : '?'}range=${a}-${b}`;
+const F = (src) => src.net?.fetch || fetch;
 
-async function probe(url, headers) {
+async function probe(url, headers, f = fetch) {
   try {
-    const r = await fetch(withRange(url, 0, 1), { headers });
-    r.body?.cancel().catch(() => {});
+    const r = await f(withRange(url, 0, 1), { headers, signal: AbortSignal.timeout(15000) });
+    r.body?.cancel?.().catch?.(() => {});
     if (r.status !== 200 && r.status !== 206) return { ok: false, error: `HTTP ${r.status}` };
     const cr = r.headers.get('content-range');
     let total = cr ? parseInt(cr.split('/')[1], 10) : 0;
@@ -123,27 +303,53 @@ async function probe(url, headers) {
 
 async function oembed(id) {
   try {
-    const r = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`);
-    const j = await r.json();
+    const j = await getJson(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`, 6000);
     return { title: j.title, author: (j.author_name || '').replace(/\s*-\s*Topic$/i, '') };
   } catch { return {}; }
 }
 
-const std = (h) => ({ Accept: '*/*', 'Accept-Language': 'en-US,en;q=0.9', ...h });
+/* ───────────────────────── Resolvers ───────────────────────── */
 
-// 1) Clientes "raw" de Innertube
+// A) youtubei.js (descifra firmas, usa PO token en clientes web)
+const NEEDS_POT = new Set(['WEB', 'MWEB', 'YTMUSIC', 'WEB_EMBEDDED', 'WEB_CREATOR']);
+
+async function resolveYtjs(id, netObj, auth, client) {
+  const yt = await getYT(netObj, auth);
+  let pot;
+  if (NEEDS_POT.has(client)) { const m = await getMinter(); if (m) pot = await m.mintAsWebsafeString(id); }
+
+  const info = await yt.getBasicInfo(id, { client, ...(pot ? { po_token: pot } : {}) });
+  const st = info.playability_status;
+  if (st && st.status !== 'OK') throw new Error(`${st.status}${st.reason ? ': ' + st.reason : ''}`);
+
+  let f;
+  try { f = info.chooseFormat({ type: 'audio', quality: 'best', format: 'mp4' }); }
+  catch { f = info.chooseFormat({ type: 'audio', quality: 'best', format: 'any' }); }
+  let url = await f.decipher(yt.session.player);
+  if (!url) throw new Error('sin URL');
+  if (pot && !/[?&]pot=/.test(url)) url += `&pot=${pot}`;
+
+  const mime = f.mime_type || '';
+  return {
+    url, net: netObj, headers: std({ 'User-Agent': CLIENT_UA[client] || CHROME_UA }),
+    size: f.content_length || 0, ext: mime.includes('mp4') ? 'm4a' : 'webm', mimeType: mime.split(';')[0] || 'audio/mp4',
+    title: info.basic_info?.title, author: (info.basic_info?.author || '').replace(/\s*-\s*Topic$/i, '')
+  };
+}
+
+// B) Clientes Innertube "crudos"
 const RAW = {
-  ANDROID_VR: { ua: UA_VR, client: { clientName: 'ANDROID_VR', clientVersion: '1.60.19', deviceMake: 'Oculus', deviceModel: 'Quest 3', androidSdkVersion: 32, osName: 'Android', osVersion: '12L' } },
-  VISIONOS: { ua: UA_VISION, client: { clientName: 'VISIONOS', clientVersion: '1.02', deviceMake: 'Apple', deviceModel: 'RealityDevice17,1', osName: 'visionOS', osVersion: '26.5.23O471' } },
-  IOS: { ua: UA_IOS, client: { clientName: 'IOS', clientVersion: '19.45.4', deviceMake: 'Apple', deviceModel: 'iPhone16,2', osName: 'iPhone', osVersion: '18.1.0.22B83' } }
+  ANDROID_VR: { client: { clientName: 'ANDROID_VR', clientVersion: '1.60.19', deviceMake: 'Oculus', deviceModel: 'Quest 3', androidSdkVersion: 32, osName: 'Android', osVersion: '12L' } },
+  VISIONOS: { client: { clientName: 'VISIONOS', clientVersion: '1.02', deviceMake: 'Apple', deviceModel: 'RealityDevice17,1', osName: 'visionOS', osVersion: '26.5.23O471' } },
+  IOS: { client: { clientName: 'IOS', clientVersion: '19.45.4', deviceMake: 'Apple', deviceModel: 'iPhone16,2', osName: 'iPhone', osVersion: '18.1.0.22B83' } }
 };
 
-async function resolveRaw(id, name) {
-  const c = RAW[name];
+async function resolveRaw(id, name, netObj) {
+  const c = RAW[name], ua = CLIENT_UA[name];
   const cfg = await getInnertubeConfig();
-  const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+  const res = await netObj.fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': c.ua, ...(cfg.cookieHeader ? { Cookie: cfg.cookieHeader } : {}) },
+    headers: { 'Content-Type': 'application/json', 'User-Agent': ua },
     body: JSON.stringify({ context: { client: { ...c.client, visitorData: cfg.visitorData, hl: 'en', gl: 'US' } }, videoId: id })
   });
   const data = await res.json();
@@ -153,72 +359,106 @@ async function resolveRaw(id, name) {
   if (!f) throw new Error('sin formato de audio con URL directa');
   const vd = data.videoDetails || {};
   return {
-    url: f.url, headers: std({ 'User-Agent': c.ua }),
-    size: parseInt(f.contentLength, 10) || 0,
+    url: f.url, net: netObj, headers: std({ 'User-Agent': ua }), size: parseInt(f.contentLength, 10) || 0,
     ext: f.mimeType?.includes('mp4') ? 'm4a' : 'webm', mimeType: f.mimeType?.split(';')[0],
     title: vd.title, author: (vd.author || '').replace(/\s*-\s*Topic$/i, '')
   };
 }
 
-// 2) youtubei.js (descifra firmas/"n" por sí mismo)
-let ytPromise = null;
-const getYT = () => (ytPromise ||= import('youtubei.js').then(m => m.Innertube.create({ retrieve_player: true })).catch(e => { ytPromise = null; throw new Error('youtubei.js no instalado (npm i youtubei.js): ' + e.message); }));
-const YT_UA = { ANDROID_VR: UA_VR, IOS: UA_IOS, ANDROID: 'com.google.android.youtube/19.44.38 (Linux; U; Android 14) gzip' };
-
-async function resolveYtjs(id, client) {
-  const yt = await getYT();
-  let fmt;
-  try { fmt = await yt.getStreamingData(id, { type: 'audio', quality: 'best', format: 'mp4', client }); }
-  catch { fmt = await yt.getStreamingData(id, { type: 'audio', quality: 'best', format: 'any', client }); }
-  const url = fmt.url || (await fmt.decipher(yt.session.player));
-  if (!url) throw new Error('sin URL');
-  const mime = fmt.mime_type || '';
-  return {
-    url, headers: std({ 'User-Agent': YT_UA[client] || CHROME_UA }),
-    size: fmt.content_length || 0, ext: mime.includes('mp4') ? 'm4a' : 'webm', mimeType: mime.split(';')[0]
-  };
+// C) Instancias públicas de Piped / Invidious (ellas hablan con YouTube, no tu IP)
+async function firstValid(tasks) {
+  return Promise.any(tasks.map(async t => {
+    const s = await t();
+    const p = await probe(s.url, s.headers);
+    if (!p.ok) throw new Error(p.error);
+    s.size = p.total || s.size;
+    return s;
+  }));
 }
 
-const RESOLVERS = [
-  ['raw:ANDROID_VR', id => resolveRaw(id, 'ANDROID_VR')],
-  ['raw:VISIONOS', id => resolveRaw(id, 'VISIONOS')],
-  ['raw:IOS', id => resolveRaw(id, 'IOS')],
-  ['youtubei.js:ANDROID_VR', id => resolveYtjs(id, 'ANDROID_VR')],
-  ['youtubei.js:IOS', id => resolveYtjs(id, 'IOS')],
-  ['youtubei.js:ANDROID', id => resolveYtjs(id, 'ANDROID')],
-  ['youtubei.js:TV', id => resolveYtjs(id, 'TV')],
-  ['youtubei.js:WEB_EMBEDDED', id => resolveYtjs(id, 'WEB_EMBEDDED')],
-  ['youtubei.js:MWEB', id => resolveYtjs(id, 'MWEB')]
-];
+async function resolvePiped(id) {
+  const insts = await getJson('https://piped-instances.kavin.rocks/');
+  const apis = shuffle(insts.map(i => i.api_url).filter(Boolean)).slice(0, 10);
+  return firstValid(apis.map(api => async () => {
+    const j = await getJson(`${api}/streams/${id}`, 9000);
+    const list = (j.audioStreams || []).filter(s => s.url);
+    const a = list.filter(s => /m4a|mp4/i.test(`${s.mimeType} ${s.format}`)).sort((x, y) => y.bitrate - x.bitrate)[0] || list[0];
+    if (!a) throw new Error('sin audio');
+    const m4a = /m4a|mp4/i.test(`${a.mimeType} ${a.format}`);
+    return { url: a.url, net: DIRECT, headers: std({ 'User-Agent': CHROME_UA }), size: a.contentLength > 0 ? a.contentLength : 0, ext: m4a ? 'm4a' : 'webm', mimeType: a.mimeType?.split(';')[0] || 'audio/mp4', title: j.title, author: (j.uploader || '').replace(/\s*-\s*Topic$/i, '') };
+  }));
+}
 
-const cache = new Map(); // id → { at, src }
-async function resolveStream(id, { fresh = false } = {}) {
-  const hit = cache.get(id);
-  if (!fresh && hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.src;
+async function resolveInvidious(id) {
+  const insts = await getJson('https://api.invidious.io/instances.json?sort_by=health');
+  const uris = insts.filter(([, i]) => i.api && i.type === 'https' && i.uri).map(([, i]) => i.uri).slice(0, 10);
+  return firstValid(uris.map(uri => async () => {
+    const j = await getJson(`${uri}/api/v1/videos/${id}?local=true&fields=title,author,adaptiveFormats`, 9000);
+    const list = (j.adaptiveFormats || []).filter(f => f.type?.startsWith('audio/') && f.url);
+    const a = list.filter(f => f.type.includes('mp4')).sort((x, y) => y.bitrate - x.bitrate)[0] || list[0];
+    if (!a) throw new Error('sin audio');
+    return { url: new URL(a.url, uri).href, net: DIRECT, headers: std({ 'User-Agent': CHROME_UA }), size: parseInt(a.clen, 10) || 0, ext: a.type.includes('mp4') ? 'm4a' : 'webm', mimeType: a.type.split(';')[0], title: j.title, author: (j.author || '').replace(/\s*-\s*Topic$/i, '') };
+  }));
+}
 
-  const attempts = [];
-  for (const [name, fn] of RESOLVERS) {
+function buildPlan(nets, external) {
+  const plan = [];
+  for (const n of nets) { // con sesión: lo más probable que funcione, va primero
+    if (!n.proxy && authState.ok) for (const c of ['TV', 'TV_SIMPLY', 'YTMUSIC', 'WEB']) plan.push([`${n.name}/oauth:${c}`, id => resolveYtjs(id, n, 'oauth', c)]);
+    if (parseCookies()) for (const c of ['YTMUSIC', 'WEB', 'MWEB']) plan.push([`${n.name}/cookies:${c}`, id => resolveYtjs(id, n, 'cookie', c)]);
+  }
+  for (const n of nets) {
+    const clients = n.proxy ? ['YTMUSIC', 'WEB', 'MWEB', 'TV', 'ANDROID_VR'] : ['YTMUSIC', 'WEB', 'MWEB', 'TV', 'TV_SIMPLY', 'WEB_EMBEDDED', 'IOS', 'ANDROID_VR', 'ANDROID'];
+    for (const c of clients) plan.push([`${n.name}/ytjs:${c}`, id => resolveYtjs(id, n, 'anon', c)]);
+    for (const c of ['ANDROID_VR', 'IOS', 'VISIONOS']) plan.push([`${n.name}/raw:${c}`, id => resolveRaw(id, c, n)]);
+  }
+  if (external) plan.push(['piped', resolvePiped], ['invidious', resolveInvidious]);
+  return plan;
+}
+
+const cache = new Map();
+let goodMethod = null;
+
+async function runPlan(id, plan, attempts) {
+  if (goodMethod) { const i = plan.findIndex(p => p[0] === goodMethod); if (i > 0) plan.unshift(plan.splice(i, 1)[0]); }
+  for (const [name, fn] of plan) {
     try {
-      const src = await fn(id);
-      const p = await probe(src.url, src.headers);
+      const src = await withTimeout(fn(id), 40000);
+      const p = await probe(src.url, src.headers, F(src));
       if (!p.ok) throw new Error(`URL rechazada (${p.error})`);
       src.size = p.total || src.size || 0;
       src.method = name;
       if (!src.title) Object.assign(src, await oembed(id));
       src.title ||= id; src.author ||= 'YouTube Music';
-      const base = `${src.author} - ${src.title}`.replace(/[/\\?%*:|"<>]/g, '_');
-      src.filename = `${base}.${src.ext}`;
-      cache.set(id, { at: Date.now(), src });
-      console.log(`✔ resolver ${name} | ${src.size} bytes | ${src.filename}`);
+      src.filename = `${src.author} - ${src.title}`.replace(/[/\\?%*:|"<>]/g, '_') + '.' + src.ext;
+      goodMethod = name;
+      console.log(`✔ ${name} | ${src.size} bytes | ${src.filename}`);
       return src;
     } catch (e) {
-      attempts.push({ method: name, error: String(e.message).slice(0, 160) });
-      console.log(`✖ resolver ${name}: ${e.message}`);
+      const msg = String(e?.errors ? e.errors.map(x => x.message).slice(0, 3).join(' | ') : e.message).slice(0, 170);
+      attempts.push({ method: name, error: msg });
+      console.log(`✖ ${name}: ${msg}`);
     }
   }
-  const err = new Error('Ningún método pudo obtener un audio válido.');
-  err.attempts = attempts;
-  throw err;
+  return null;
+}
+
+async function resolveStream(id, { fresh = false } = {}) {
+  const hit = cache.get(id);
+  if (!fresh && hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.src;
+
+  const attempts = [];
+  const proxies = await Promise.all(staticProxies().map(p => makeNet(p).catch(() => null)));
+  let src = await runPlan(id, buildPlan([DIRECT, ...proxies.filter(Boolean)], true), attempts);
+
+  if (!src && process.env.AUTO_PROXY === '1') {
+    await discoverFreeProxies();
+    const free = (await Promise.all(freeProxies.map(p => makeNet(p).catch(() => null)))).filter(Boolean);
+    if (free.length) src = await runPlan(id, buildPlan(free, false), attempts);
+  }
+  if (!src) { const err = new Error('Ningún método pudo obtener un audio válido.'); err.attempts = attempts; throw err; }
+  cache.set(id, { at: Date.now(), src });
+  return src;
 }
 
 /* ───────────────────────── Descarga por chunks ───────────────────────── */
@@ -229,7 +469,7 @@ async function fetchPiece(src, start, end, tries = 5) {
   for (let t = 0; t < tries; t++) {
     try {
       const viaHeader = t % 2 === 1;
-      const r = await fetch(viaHeader ? src.url : withRange(src.url, start, end), {
+      const r = await F(src)(viaHeader ? src.url : withRange(src.url, start, end), {
         headers: { ...src.headers, ...(viaHeader ? { Range: `bytes=${start}-${end}` } : {}) }
       });
       if (r.status !== 200 && r.status !== 206) throw new Error(`HTTP ${r.status}`);
@@ -273,7 +513,7 @@ async function streamChunked(src, chunks, res) {
 }
 
 async function streamSingle(src, res) {
-  const r = await fetch(src.url, { headers: src.headers });
+  const r = await F(src)(src.url, { headers: src.headers });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   for await (const part of r.body) { if (!res.write(part)) await new Promise(x => res.once('drain', x)); }
   res.end();
@@ -284,16 +524,22 @@ async function streamSingle(src, res) {
 const app = express();
 app.get('/', (_req, res) => res.type('html').send(HTML));
 
-app.get('/api/status', async (_req, res) => {
-  let ytjs = true; try { await import('youtubei.js'); } catch { ytjs = false; }
-  res.json({ node: process.version, youtubeiJs: ytjs, cookies: !!cookiesFile() });
+app.get('/api/status', (_req, res) => {
+  res.json({
+    node: process.version,
+    poToken: minterState,
+    cookies: !!parseCookies(),
+    proxies: staticProxies().length + freeProxies.length,
+    oauth: authState,
+    lastGoodMethod: goodMethod
+  });
 });
 
 app.get('/api/search', async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'Consulta vacía' });
-  try { return res.json(await searchMusic(q)); }
-  catch (e) { return res.status(502).json({ error: 'Búsqueda falló: ' + e.message }); }
+  try { const r = await searchMusic(q); if (r.length) return res.json(r); } catch (e) { console.log('search crudo falló:', e.message); }
+  try { return res.json(await searchYtjs(q)); } catch (e) { return res.status(502).json({ error: 'Búsqueda falló: ' + e.message }); }
 });
 
 app.get('/api/resolve', async (req, res) => {
@@ -305,7 +551,7 @@ app.get('/api/resolve', async (req, res) => {
   } catch (e) {
     res.status(502).json({
       error: e.message, attempts: e.attempts,
-      hint: 'Instala youtubei.js (npm i youtubei.js) y actualízalo regularmente: npm i youtubei.js@latest'
+      hint: 'Si ves "not a bot": tu IP está marcada. Prueba (1) apagar/prender datos o modo avión para cambiar de IP, (2) exportar cookies a ytmusic.txt, (3) YT_LOGIN=1 node server.js, (4) proxies.txt con un proxy residencial. Y npm i youtubei.js@latest bgutils-js jsdom undici'
     });
   }
 });
@@ -324,7 +570,7 @@ app.get('/api/download', async (req, res) => {
 
   const t0 = Date.now();
   const steps = [];
-  if (src.size) steps.push(['chunks x' + chunks, () => streamChunked(src, chunks, res)]);
+  if (src.size) steps.push([`chunks x${chunks}`, () => streamChunked(src, chunks, res)]);
   steps.push(['stream único', () => streamSingle(src, res)]);
 
   for (const [name, fn] of steps) {
@@ -343,10 +589,13 @@ app.get('/api/download', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', async () => {
-  let ytjs = true; try { await import('youtubei.js'); } catch { ytjs = false; }
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`http://localhost:${PORT}`);
-  console.log(`youtubei.js: ${ytjs ? 'OK' : 'NO (npm i youtubei.js)'}`);
+  if (process.env.PORT !== '0') {
+    getMinter();                                              // precalienta el PO token
+    if (process.env.YT_LOGIN === '1' || oauthCreds) startOauth();
+    if (process.env.AUTO_PROXY === '1') discoverFreeProxies();
+  }
 });
 
 /* ───────────────────────── HTML ───────────────────────── */
@@ -363,8 +612,10 @@ h1{font-size:20px;margin:4px 0 14px}
 .row{display:flex;gap:8px}
 input{flex:1;min-width:0;padding:12px;border-radius:10px;border:1px solid #2b2b34;background:var(--card);color:var(--tx);font-size:16px}
 button{padding:12px 16px;border:0;border-radius:10px;background:var(--ac);color:#fff;font-weight:600;font-size:15px}
-.chunks{margin:14px 0;background:var(--card);padding:12px;border-radius:12px}
+.chunks,.sys{margin:14px 0;background:var(--card);padding:12px;border-radius:12px}
 .chunks small{color:var(--mut);display:block;margin-bottom:8px}
+.sys{font-size:12.5px;color:var(--mut);white-space:pre-wrap}
+.sys b{color:var(--tx)}
 .pills{display:flex;flex-wrap:wrap;gap:6px}
 .pill{padding:8px 12px;border-radius:999px;background:#2a2a33}
 .pill.on{background:var(--ac)}
@@ -382,6 +633,7 @@ button{padding:12px 16px;border:0;border-radius:10px;background:var(--ac);color:
 <h1>🎵 YT Music Downloader</h1>
 <div class="row"><input id="q" placeholder="Canción, artista o link…"><button id="go">Buscar</button></div>
 <div class="chunks"><small>Chunks en paralelo (más chunks = más rápido hasta saturar tu red)</small><div class="pills" id="pills"></div></div>
+<div class="sys" id="sys">Cargando estado…</div>
 <div id="msg"></div><div id="list"></div>
 <script>
 var chunks=+localStorage.getItem('chunks')||4;
@@ -390,6 +642,16 @@ var pills=document.getElementById('pills');
 function drawPills(){pills.innerHTML='';opts.forEach(function(n){var b=document.createElement('button');b.className='pill'+(n===chunks?' on':'');b.textContent=n;b.onclick=function(){chunks=n;localStorage.setItem('chunks',n);drawPills();};pills.appendChild(b);});}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function extractId(s){var m=s.match(/(?:v=|youtu\\.be\\/|shorts\\/)([A-Za-z0-9_-]{11})/);return m?m[1]:(/^[A-Za-z0-9_-]{11}$/.test(s)?s:null);}
+async function status(){
+  try{
+    var s=await (await fetch('/api/status')).json();
+    var t='PO token: '+(s.poToken.ok?'<b>OK</b>':'<b>no</b> ('+esc(s.poToken.error)+')')+'\\nCookies: <b>'+(s.cookies?'sí':'no')+'</b> · Proxies: <b>'+s.proxies+'</b> · Login OAuth: <b>'+(s.oauth.ok?'sí':'no')+'</b>';
+    if(s.oauth.pending)t+='\\n🔑 Abre <b>'+esc(s.oauth.pending.url)+'</b> e ingresa el código <b>'+esc(s.oauth.pending.code)+'</b>';
+    if(s.oauth.error)t+='\\nOAuth: '+esc(s.oauth.error);
+    if(s.lastGoodMethod)t+='\\nÚltimo método que funcionó: <b>'+esc(s.lastGoodMethod)+'</b>';
+    document.getElementById('sys').innerHTML=t;
+  }catch(e){}
+}
 function card(x){
   var art=(x.artists||[]).map(function(a){return a.name;}).join(', ');
   var d=document.createElement('div');d.className='item';
@@ -399,7 +661,7 @@ function card(x){
 }
 async function dl(id,d){
   var btn=d.querySelector('button'),bar=d.querySelector('.bar'),fill=bar.firstChild,st=d.querySelector('.st');
-  st.className='st';btn.disabled=true;btn.textContent='…';st.textContent='Resolviendo audio (probando métodos)…';
+  st.className='st';btn.disabled=true;btn.textContent='…';st.textContent='Resolviendo audio (probando métodos, puede tardar)…';
   try{
     var r=await fetch('/api/resolve?id='+id);var j=await r.json();
     if(!r.ok){var a=(j.attempts||[]).map(function(t){return '• '+t.method+': '+t.error;}).join('\\n');throw new Error(j.error+'\\n'+a+'\\n\\n'+(j.hint||''));}
@@ -416,7 +678,7 @@ async function dl(id,d){
     var a=document.createElement('a');a.href=URL.createObjectURL(new Blob(parts));a.download=j.filename||'audio.m4a';document.body.appendChild(a);a.click();a.remove();
     fill.style.width='100%';st.textContent='✔ Listo en '+sec2+' s · '+(got/1048576).toFixed(2)+' MB · '+j.method+' · '+chunks+' chunks';
   }catch(e){st.className='st err';st.textContent='✖ '+e.message;}
-  btn.disabled=false;btn.textContent='Descargar';
+  btn.disabled=false;btn.textContent='Descargar';status();
 }
 async function search(){
   var q=document.getElementById('q').value.trim();if(!q)return;
@@ -433,8 +695,11 @@ async function search(){
 }
 document.getElementById('go').onclick=search;
 document.getElementById('q').addEventListener('keydown',function(e){if(e.key==='Enter')search();});
-drawPills();
+drawPills();status();setInterval(status,5000);
 </script></body></html>`;
+
+/* ───────────────────────── Exports (CommonJS) ───────────────────────── */
+
 
 /* ───────────────────────── Exports (CommonJS) ───────────────────────── */
 
