@@ -438,14 +438,14 @@ drawPills();
 
 /* ───────────────────────── Exports (CommonJS) ───────────────────────── */
 
-module.exports = {
+/*module.exports = {
   parseCookies,
   extractVideoId,
   resolveStream,
   fetchPiece,
   streamChunked,
   app
-};
+};*/
 /* ───────────────────────── Exports (CommonJS) ───────────────────────── */
 
 /*module.exports = {
