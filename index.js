@@ -1,215 +1,402 @@
+// npm i express   |   node server.js
+const dns = require('dns');
+const net = require('net');
+const path = require('path');
+const { existsSync, readFileSync } = require('fs');
 const express = require('express');
 
-/* =========================================================
- *  CLIENTE CNVMP3
- * =======================================================*/
-class CNVMP3 {
-  constructor(opts = {}) {
-    this.baseUrl     = opts.baseUrl     ?? 'https://cnvmp3.com';
-    this.downloadUrl = opts.downloadUrl ?? 'https://apio11dlp.cnvmp3.site';
-    this.referer     = opts.referer     ?? `${this.baseUrl}/v55`;
-    this.userAgent   = opts.userAgent   ??
-      'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Mobile Safari/537.36';
-    this.timeout     = opts.timeout ?? 30000;
-    this.token       = opts.token   ?? '1234';
-  }
+// ── FIX 403 (Termux): la URL de googlevideo queda atada a la IP con que se pidió.
+// Si Node alterna IPv4/IPv6 entre el "player" y la descarga, da 403. Forzamos IPv4.
+dns.setDefaultResultOrder('ipv4first');
+try { net.setDefaultAutoSelectFamily(false); } catch {}
 
-  _headers(extra = {}) {
-    return {
-      'accept':             '*/*',
-      'accept-language':    'es-PE,es-419;q=0.9,es;q=0.8',
-      'content-type':       'application/json',
-      'origin':             this.baseUrl,
-      'referer':            this.referer,
-      'user-agent':         this.userAgent,
-      'sec-ch-ua':          '"Not A(Brand";v="8", "Chromium";v="132"',
-      'sec-ch-ua-mobile':   '?1',
-      'sec-ch-ua-platform': '"Android"',
-      'sec-fetch-dest':     'empty',
-      'sec-fetch-mode':     'cors',
-      'sec-fetch-site':     'same-origin',
-      ...extra,
-    };
-  }
+const BASE_URL = 'https://music.youtube.com';
+const MAX_PIECE = 9 * 1024 * 1024;   // googlevideo corta rangos muy grandes (403)
+const MIN_PIECE = 256 * 1024;
 
-  async _post(endpoint, body) {
-    const ctrl = new AbortController();
-    const t    = setTimeout(() => ctrl.abort(), this.timeout);
+let cachedContext = null;
+let lastContextTime = 0;
+
+/* ───────────────────────── Cookies / config ───────────────────────── */
+
+function parseCookies(input = null) {
+  if (input === false || input === '') return '';
+  if (input && typeof input === 'string' && input.includes('=')) return input.trim();
+
+  const parseCookieFile = (filePath) => {
     try {
-      const res = await fetch(`${this.baseUrl}/${endpoint}`, {
-        method:  'POST',
-        headers: this._headers(),
-        body:    JSON.stringify(body),
-        signal:  ctrl.signal,
-      });
-      const text = await res.text();
-      let data;
-      try { data = JSON.parse(text); } catch { data = text; }
+      return readFileSync(filePath, 'utf8')
+        .split('\n').map(l => l.trim())
+        .filter(l => l && (!l.startsWith('#') || l.startsWith('#HttpOnly_')))
+        .map(l => {
+          const clean = l.replace(/^#HttpOnly_/, '');
+          const p = clean.includes('\t') ? clean.split('\t') : clean.split(/\s+/);
+          return p.length >= 7 ? `${p[5]}=${p[6]}` : l;
+        }).join('; ');
+    } catch { return ''; }
+  };
 
-      if (!res.ok) {
-        const err = new Error(`HTTP ${res.status} en ${endpoint}`);
-        err.status = res.status;
-        err.body   = data;
-        throw err;
-      }
-      return data;
-    } finally {
-      clearTimeout(t);
-    }
+  if (input && typeof input === 'string' && existsSync(input)) return parseCookieFile(input);
+
+  for (const c of [path.join(__dirname, 'ytmusic.txt'), 'ytmusic.txt',
+                   path.join(__dirname, 'ytcook.txt'), 'ytcook.txt']) {
+    if (existsSync(c)) return parseCookieFile(c);
   }
-
-  async checkDatabase(youtubeId, quality = 4, formatValue = 1) {
-    if (!youtubeId) throw new Error('youtubeId es requerido');
-    return this._post('check_database.php', {
-      youtube_id:  youtubeId,
-      quality,
-      formatValue,
-    });
-  }
-
-  async getVideoData(youtubeUrl, token = this.token) {
-    if (!youtubeUrl) throw new Error('youtubeUrl es requerido');
-    return this._post('get_video_data.php', {
-      url:   youtubeUrl,
-      token,
-    });
-  }
-
-  async downloadVideoUcep({ url, quality = 4, title, formatValue = 1 }) {
-    if (!url)   throw new Error('url es requerido');
-    if (!title) throw new Error('title es requerido');
-    return this._post('download_video_ucep.php', {
-      url,
-      quality,
-      title,
-      formatValue,
-    });
-  }
-
-  async insertToDatabase({ youtubeId, serverPath, quality = 4, title, formatValue = 1 }) {
-    if (!youtubeId)  throw new Error('youtubeId es requerido');
-    if (!serverPath) throw new Error('serverPath es requerido');
-    if (!title)      throw new Error('title es requerido');
-    return this._post('insert_to_database.php', {
-      youtube_id:  youtubeId,
-      server_path: serverPath,
-      quality,
-      title,
-      formatValue,
-    });
-  }
-
-  async smartDownload(youtubeId, { quality = 4, formatValue = 1 } = {}) {
-    if (!youtubeId) throw new Error('youtubeId es requerido');
-
-    const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeId}`;
-
-    // 1) ¿Ya existe en la DB?
-    const check = await this.checkDatabase(youtubeId, quality, formatValue);
-    const raw   = { check };
-
-    if (check?.success && check?.data?.server_path) {
-      return {
-        source:       'db',
-        alreadyInDb:  true,
-        title:        check.data.title,
-        downloadLink: check.data.server_path,
-        raw,
-      };
-    }
-
-    // 2) Obtener datos del video
-    const data = await this.getVideoData(youtubeUrl);
-    raw.data = data;
-    if (!data?.success || !data?.title) {
-      throw new Error(`get_video_data falló: ${JSON.stringify(data)}`);
-    }
-    const title = data.title;
-
-    // 3) Convertir
-    const conv = await this.downloadVideoUcep({
-      url: youtubeUrl,
-      quality,
-      title,
-      formatValue,
-    });
-    raw.convert = conv;
-
-    if (!conv?.download_link) {
-      throw new Error(`download_video_ucep falló: ${JSON.stringify(conv)}`);
-    }
-
-    // 4) Insertar en DB
-    let insertResult;
-    try {
-      insertResult = await this.insertToDatabase({
-        youtubeId,
-        serverPath: conv.download_link,
-        quality,
-        title,
-        formatValue,
-      });
-    } catch (e) {
-      insertResult = { success: false, error: e.message };
-    }
-    raw.insert = insertResult;
-
-    return {
-      source:       'fresh',
-      alreadyInDb:  insertResult?.success === false &&
-                    /duplicate/i.test(insertResult?.error || ''),
-      title,
-      downloadLink: conv.download_link,
-      raw,
-    };
-  }
+  return '';
 }
 
-/* =========================================================
- *  SERVIDOR EXPRESS
- * =======================================================*/
-const app  = express();
-const PORT = 3333;
+async function getInnertubeConfig(customCookie = null) {
+  const cookieHeader = parseCookies(customCookie);
+  const now = Date.now();
+  if (cachedContext && now - lastContextTime < 1800000 && cachedContext.cookieHeader === cookieHeader) return cachedContext;
 
-app.use(express.json());
+  const [musicHtml, visitorData] = await Promise.all([
+    fetch(BASE_URL, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        ...(cookieHeader ? { Cookie: cookieHeader } : {})
+      }
+    }).then(r => r.text()),
+    fetch('https://www.youtube.com/sw.js_data', { headers: cookieHeader ? { Cookie: cookieHeader } : {} })
+      .then(r => r.text())
+      .then(t => JSON.parse(t.slice(5))[0][2][0][0][13])
+      .catch(() => undefined)
+  ]);
 
-const client = new CNVMP3({
-  baseUrl:     process.env.CNVMP3_BASE_URL     || 'https://cnvmp3.com',
-  downloadUrl: process.env.CNVMP3_DOWNLOAD_URL || 'https://apio11dlp.cnvmp3.site',
-  token:       process.env.CNVMP3_TOKEN        || '1234',
-  timeout:     Number(process.env.CNVMP3_TIMEOUT || 30000),
+  const apiKey = musicHtml.match(/"INNERTUBE_API_KEY":\s*"([^"]+)"/)?.[1];
+  const clientVersion = musicHtml.match(/"INNERTUBE_CLIENT_VERSION":\s*"([^"]+)"/)?.[1] || '1.20261011.16.00';
+
+  cachedContext = {
+    apiKey, clientVersion, visitorData, cookieHeader,
+    context: { client: { clientName: 'WEB_REMIX', clientVersion, hl: 'en', gl: 'US', ...(visitorData ? { visitorData } : {}) } }
+  };
+  lastContextTime = now;
+  return cachedContext;
+}
+
+/* ───────────────────────── Helpers ───────────────────────── */
+
+function extractVideoId(input) {
+  if (!input) return null;
+  const str = String(input).trim();
+  if (/^(MPREb_|UC|VL|PL)/.test(str)) return null;
+  const m = str.match(/(?:youtu\.be\/|music\.youtube\.com\/(?:watch\?v=|watch\?.+&v=)|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([a-zA-Z0-9_-]{11})/);
+  if (m) return m[1];
+  return /^[a-zA-Z0-9_-]{11}$/.test(str) ? str : null;
+}
+
+async function apiRequest(endpoint, payload, options = {}) {
+  const cfg = await getInnertubeConfig(options.cookie !== undefined ? options.cookie : options.cookies);
+  const res = await fetch(`${BASE_URL}/youtubei/v1/${endpoint}?key=${cfg.apiKey}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: BASE_URL,
+      Referer: `${BASE_URL}/`,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      ...(cfg.cookieHeader ? { Cookie: cfg.cookieHeader } : {})
+    },
+    body: JSON.stringify({ context: cfg.context, ...payload })
+  });
+  if (!res.ok) throw new Error(`YouTube Music API error: HTTP ${res.status}`);
+  return res.json();
+}
+
+const runsOf = (item, i) => item?.flexColumns?.[i]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs || [];
+
+function parseResponsiveItem(item) {
+  const ir = item.musicResponsiveListItemRenderer;
+  if (!ir) return null;
+  const c0 = runsOf(ir, 0), c1 = runsOf(ir, 1), c2 = runsOf(ir, 2);
+
+  const artists = c1
+    .filter(r => r.navigationEndpoint?.browseEndpoint?.browseId?.startsWith('UC'))
+    .map(r => ({ name: r.text, id: r.navigationEndpoint.browseEndpoint.browseId }));
+
+  const albumRun = [...c1, ...c2].find(r => r.navigationEndpoint?.browseEndpoint?.browseId?.startsWith('MPREb_'));
+  const durationRun = [...c1, ...c2].find(r => /^\d+:\d+$/.test(r.text))
+    || ir.fixedColumns?.[0]?.musicResponsiveListItemFixedColumnRenderer?.text?.runs?.[0];
+
+  const videoId = ir.playlistItemData?.videoId
+    || ir.overlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId
+    || c0[0]?.navigationEndpoint?.watchEndpoint?.videoId;
+  const browseId = c0[0]?.navigationEndpoint?.browseEndpoint?.browseId || ir.navigationEndpoint?.browseEndpoint?.browseId;
+  const thumbs = ir.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
+
+  const t = (c1[0]?.text || '').toLowerCase();
+  let type = 'unknown';
+  if (t.includes('song')) type = 'song';
+  else if (t.includes('video')) type = 'video';
+  else if (t.includes('artist')) type = 'artist';
+  else if (t.includes('album') || t.includes('ep')) type = 'album';
+  else if (t.includes('playlist')) type = 'playlist';
+  else if (videoId) type = 'song';
+  else if (browseId?.startsWith('UC')) type = 'artist';
+  else if (browseId?.startsWith('MPREb_')) type = 'album';
+  else if (browseId?.startsWith('VL')) type = 'playlist';
+
+  return {
+    type, title: c0[0]?.text || '', videoId: videoId || null, browseId: browseId || null,
+    artists, album: albumRun ? { name: albumRun.text, id: albumRun.navigationEndpoint.browseEndpoint.browseId } : null,
+    duration: durationRun?.text || null,
+    thumbnail: thumbs.length ? thumbs[thumbs.length - 1].url : null
+  };
+}
+
+/* ───────────────────────── Búsqueda ───────────────────────── */
+
+async function searchSongs(query, options = {}) {
+  if (!query?.trim()) throw new Error('Search query cannot be empty');
+  const data = await apiRequest('search', { query: query.trim(), params: 'EgWKAQIIAWoSEAUQAxAJEAoQERAQEAQQDhAV' }, options);
+  const sections = data.contents?.tabbedSearchResultsRenderer?.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents || [];
+  return (sections[0]?.musicShelfRenderer?.contents || []).map(parseResponsiveItem).filter(Boolean);
+}
+
+/* ───────────────────────── Stream de audio (FIX 403) ───────────────────────── */
+
+// Varios clientes: si uno devuelve una URL que da 403, probamos el siguiente.
+const CLIENTS = [
+  {
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15',
+    client: { clientName: 'VISIONOS', clientVersion: '1.02', deviceMake: 'Apple', deviceModel: 'RealityDevice17,1', osName: 'visionOS', osVersion: '26.5.23O471' }
+  },
+  {
+    ua: 'com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip',
+    client: { clientName: 'ANDROID_VR', clientVersion: '1.60.19', deviceMake: 'Oculus', deviceModel: 'Quest 3', androidSdkVersion: 32, osName: 'Android', osVersion: '12L' }
+  },
+  {
+    ua: 'com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)',
+    client: { clientName: 'IOS', clientVersion: '19.45.4', deviceMake: 'Apple', deviceModel: 'iPhone16,2', osName: 'iPhone', osVersion: '18.1.0.22B83' }
+  }
+];
+
+const streamHeaders = (ua) => ({ 'User-Agent': ua, Accept: '*/*', 'Accept-Language': 'en-US,en;q=0.9' });
+
+// Prueba real: pide 2 bytes. Si da 200/206 la URL sirve desde esta IP.
+async function probe(url, ua) {
+  try {
+    const r = await fetch(`${url}&range=0-1`, { headers: streamHeaders(ua) });
+    await r.arrayBuffer().catch(() => {});
+    return r.status === 200 || r.status === 206;
+  } catch { return false; }
+}
+
+async function getAudioStream(videoIdOrUrl, options = {}) {
+  const videoId = extractVideoId(videoIdOrUrl);
+  if (!videoId) throw new Error('ID/URL de YouTube inválido');
+  const cfg = await getInnertubeConfig(options.cookie !== undefined ? options.cookie : options.cookies);
+
+  for (const c of CLIENTS) {
+    try {
+      const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': c.ua, ...(cfg.cookieHeader ? { Cookie: cfg.cookieHeader } : {}) },
+        body: JSON.stringify({
+          context: { client: { ...c.client, visitorData: cfg.visitorData, hl: 'en', gl: 'US' } },
+          videoId
+        })
+      });
+      const data = await res.json();
+      if (data.playabilityStatus?.status !== 'OK') continue;
+
+      const afs = data.streamingData?.adaptiveFormats || [];
+      const best = afs.find(f => f.itag === 140 && f.url) || afs.find(f => f.itag === 251 && f.url)
+        || afs.find(f => f.mimeType?.includes('audio') && f.url);
+      if (!best) continue;
+      if (!(await probe(best.url, c.ua))) continue; // 403 → siguiente cliente
+
+      const vd = data.videoDetails || {};
+      const isM4a = best.mimeType?.includes('mp4');
+      return {
+        videoId, itag: best.itag,
+        ext: isM4a ? 'm4a' : 'webm',
+        mimeType: best.mimeType?.split(';')[0],
+        bitrate: best.bitrate,
+        contentLength: best.contentLength ? parseInt(best.contentLength, 10) : null,
+        userAgent: c.ua,
+        url: best.url,
+        title: vd.title || videoId,
+        author: (vd.author || 'YouTube Music').replace(/\s*-\s*Topic$/i, ''),
+        durationSeconds: parseInt(vd.lengthSeconds, 10) || 0,
+        thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`
+      };
+    } catch { /* siguiente cliente */ }
+  }
+  return null;
+}
+
+/* ───────────────────────── Descarga por chunks en paralelo ───────────────────────── */
+
+async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function fetchPiece(audio, start, end, tries = 4) {
+  const expected = end - start + 1;
+  let lastErr;
+  for (let t = 0; t < tries; t++) {
+    try {
+      // 1º intento: parámetro &range= (lo que usa YouTube); luego header Range.
+      const useHeader = t % 2 === 1;
+      const res = await fetch(useHeader ? audio.url : `${audio.url}&range=${start}-${end}`, {
+        headers: { ...streamHeaders(audio.userAgent), ...(useHeader ? { Range: `bytes=${start}-${end}` } : {}) }
+      });
+      if (res.status !== 200 && res.status !== 206) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length !== expected) throw new Error(`Tamaño ${buf.length}/${expected}`);
+      return buf;
+    } catch (e) { lastErr = e; await sleep(300 * (t + 1)); }
+  }
+  throw lastErr;
+}
+
+/**
+ * Divide el archivo en `chunks` partes, las baja en paralelo y las escribe en orden.
+ */
+async function streamChunked(audio, chunks, res) {
+  const total = audio.contentLength;
+  let size = Math.ceil(total / chunks);
+  size = Math.min(Math.max(size, MIN_PIECE), MAX_PIECE);
+
+  const ranges = [];
+  for (let s = 0; s < total; s += size) ranges.push([s, Math.min(s + size, total) - 1]);
+
+  const slots = ranges.map(() => { let resolve; const p = new Promise(r => (resolve = r)); return { p, resolve }; });
+  let next = 0, aborted = false;
+  res.on('close', () => { aborted = true; });
+
+  const worker = async () => {
+    while (!aborted) {
+      const i = next++;
+      if (i >= ranges.length) return;
+      try { slots[i].resolve({ buf: await fetchPiece(audio, ...ranges[i]) }); }
+      catch (err) { slots[i].resolve({ err }); }
+    }
+  };
+  const workers = Array.from({ length: Math.min(chunks, ranges.length) }, worker);
+
+  for (let i = 0; i < ranges.length; i++) {
+    const { buf, err } = await slots[i].p;
+    if (err) { aborted = true; throw err; }
+    slots[i] = null;
+    if (aborted) return;
+    if (!res.write(buf)) await new Promise(r => res.once('drain', r));
+  }
+  await Promise.all(workers);
+  res.end();
+}
+
+/* ───────────────────────── Express ───────────────────────── */
+
+const app = express();
+
+app.get('/', (_req, res) => res.type('html').send(HTML));
+
+app.get('/api/search', async (req, res) => {
+  try { res.json(await searchSongs(String(req.query.q || ''))); }
+  catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-/* =========================================================
- *  ÚNICO ENDPOINT:  GET /:youtubeId
- * =======================================================*/
-app.get('/:youtubeId', async (req, res) => {
+app.get('/api/download', async (req, res) => {
   try {
-    const { youtubeId } = req.params;
-    const quality       = Number(req.query.quality     ?? 4);
-    const formatValue   = Number(req.query.formatValue ?? 1);
+    const chunks = Math.min(Math.max(parseInt(req.query.chunks, 10) || 4, 1), 32);
+    const audio = await getAudioStream(String(req.query.id || ''));
+    if (!audio) return res.status(404).send('No se pudo obtener el audio (todos los clientes dieron 403/no disponible).');
 
-    const info = await client.smartDownload(youtubeId, { quality, formatValue });
+    const base = `${audio.author} - ${audio.title}`.replace(/[/\\?%*:|"<>]/g, '_');
+    const filename = `${base}.${audio.ext}`;
+    res.setHeader('Content-Type', audio.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
 
-    res.json({
-      ok:          true,
-      youtubeId,
-      source:      info.source,       // 'db' | 'fresh'
-      alreadyInDb: info.alreadyInDb,
-      title:       info.title,
-      url:         info.downloadLink,
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    if (!audio.contentLength) { // sin tamaño no se puede partir: una sola petición
+      const r = await fetch(audio.url, { headers: streamHeaders(audio.userAgent) });
+      if (!r.ok) return res.status(502).send(`HTTP ${r.status}`);
+      res.end(Buffer.from(await r.arrayBuffer()));
+      return;
+    }
+    res.setHeader('Content-Length', audio.contentLength);
+    const t0 = Date.now();
+    await streamChunked(audio, chunks, res);
+    console.log(`✔ ${filename} | ${chunks} chunks | ${((Date.now() - t0) / 1000).toFixed(2)}s`);
+  } catch (e) {
+    console.error('✖ download:', e.message);
+    if (!res.headersSent) res.status(500).send(e.message); else res.destroy();
   }
 });
 
-/* =========================================================
- *  START
- * =======================================================*/
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 CNVMP3 URL API escuchando en http://0.0.0.0:${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => console.log(`http://localhost:${PORT}`));
+
+/* ───────────────────────── HTML ───────────────────────── */
+
+const HTML = `<!doctype html>
+<html lang="es"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YT Music Downloader</title>
+<style>
+:root{--bg:#0f0f12;--card:#1a1a20;--tx:#f2f2f5;--mut:#9a9aa6;--ac:#ff3d5a}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--tx);padding:16px;max-width:720px;margin:auto}
+h1{font-size:20px;margin:4px 0 14px}
+.row{display:flex;gap:8px}
+input{flex:1;padding:12px;border-radius:10px;border:1px solid #2b2b34;background:var(--card);color:var(--tx);font-size:16px}
+button{padding:12px 16px;border:0;border-radius:10px;background:var(--ac);color:#fff;font-weight:600;font-size:15px}
+.chunks{margin:14px 0;background:var(--card);padding:12px;border-radius:12px}
+.chunks small{color:var(--mut);display:block;margin-bottom:8px}
+.pills{display:flex;flex-wrap:wrap;gap:6px}
+.pill{padding:8px 12px;border-radius:999px;background:#2a2a33;color:var(--tx);font-size:14px}
+.pill.on{background:var(--ac)}
+.item{display:flex;gap:10px;align-items:center;background:var(--card);padding:10px;border-radius:12px;margin-bottom:8px}
+.item img{width:56px;height:56px;border-radius:8px;object-fit:cover}
+.meta{flex:1;min-width:0}.meta b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.meta span{color:var(--mut);font-size:13px}
+.item a{padding:9px 12px;border-radius:9px;background:var(--ac);color:#fff;text-decoration:none;font-weight:600;font-size:14px}
+#msg{color:var(--mut);margin:10px 0}
+</style></head><body>
+<h1>🎵 YT Music Downloader</h1>
+<div class="row"><input id="q" placeholder="Canción, artista o link…"><button id="go">Buscar</button></div>
+<div class="chunks"><small>Chunks en paralelo (más chunks = más rápido, hasta que tu red/servidor se sature)</small>
+<div class="pills" id="pills"></div></div>
+<div id="msg"></div><div id="list"></div>
+<script>
+var chunks=+localStorage.getItem('chunks')||4;
+var opts=[1,2,3,4,5,6,7,8,10,12,16,24,32];
+var pills=document.getElementById('pills');
+function drawPills(){pills.innerHTML='';opts.forEach(function(n){var b=document.createElement('button');b.className='pill'+(n===chunks?' on':'');b.textContent=n;b.onclick=function(){chunks=n;localStorage.setItem('chunks',n);drawPills();refreshLinks();};pills.appendChild(b);});}
+function refreshLinks(){document.querySelectorAll('a[data-id]').forEach(function(a){a.href='/api/download?id='+a.dataset.id+'&chunks='+chunks;});}
+function esc(s){return String(s||'').replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function extractId(s){var m=s.match(/(?:v=|youtu\\.be\\/|shorts\\/)([A-Za-z0-9_-]{11})/);return m?m[1]:(/^[A-Za-z0-9_-]{11}$/.test(s)?s:null);}
+async function search(){
+  var q=document.getElementById('q').value.trim();if(!q)return;
+  var msg=document.getElementById('msg'),list=document.getElementById('list');
+  list.innerHTML='';var id=extractId(q);
+  if(id){list.innerHTML='<div class="item"><div class="meta"><b>'+id+'</b><span>Enlace directo</span></div><a data-id="'+id+'" download>Descargar</a></div>';refreshLinks();msg.textContent='';return;}
+  msg.textContent='Buscando…';
+  try{
+    var r=await fetch('/api/search?q='+encodeURIComponent(q));var d=await r.json();
+    if(!r.ok)throw new Error(d.error);
+    msg.textContent=d.length?'':'Sin resultados';
+    list.innerHTML=d.filter(function(x){return x.videoId;}).map(function(x){
+      var art=(x.artists||[]).map(function(a){return a.name;}).join(', ');
+      return '<div class="item"><img src="'+esc(x.thumbnail)+'"><div class="meta"><b>'+esc(x.title)+'</b><span>'+esc(art)+' · '+esc(x.duration||'')+'</span></div><a data-id="'+x.videoId+'" download>Descargar</a></div>';
+    }).join('');
+    refreshLinks();
+  }catch(e){msg.textContent='Error: '+e.message;}
+}
+document.getElementById('go').onclick=search;
+document.getElementById('q').addEventListener('keydown',function(e){if(e.key==='Enter')search();});
+drawPills();
+</script></body></html>`;
+
+/* ───────────────────────── Exports (CommonJS) ───────────────────────── */
+
+/*module.exports = {
+  parseCookies,
+  getInnertubeConfig,
+  extractVideoId,
+  searchSongs,
+  getAudioStream,
+  app
+};*/
 /*const express = require("express");
 const path = require("path");
 const https = require("https");
